@@ -152,6 +152,7 @@ class PairResult:
     cache_key: str
     candidate_count: int
     cache_hit: bool
+    available_modes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -235,8 +236,9 @@ class PairAnalysisCache:
                 source_track_id,
                 target_track_id,
                 cache_key,
-                len(payload["pairs"]),
+                len(payload["pairs"]) + len(payload.get("clean_break_pairs", [])),
                 True,
+                self._available_modes(payload),
             )
 
         source_payload = json.loads(source.analysis_path.read_text(encoding="utf-8"))
@@ -268,9 +270,19 @@ class PairAnalysisCache:
             source_track_id,
             target_track_id,
             cache_key,
-            len(result["pairs"]),
+            len(result["pairs"]) + len(result.get("clean_break_pairs", [])),
             False,
+            self._available_modes(result),
         )
+
+    @staticmethod
+    def _available_modes(payload: dict[str, Any]) -> tuple[str, ...]:
+        modes = []
+        if payload.get("pairs"):
+            modes.append("beat_sync_crossfade")
+        if payload.get("clean_break_pairs"):
+            modes.append("clean_break")
+        return tuple(modes)
 
     def payload(self, source_track_id: str, target_track_id: str) -> dict[str, Any]:
         result = self.ensure(source_track_id, target_track_id)
@@ -306,7 +318,11 @@ class TransitionPipeline:
         status: TransitionStatus = (
             "analyzed" if result.candidate_count > 0 else "blocked"
         )
-        reason = None if result.candidate_count > 0 else "no_compatible_candidates"
+        reason = (
+            "clean_break_required"
+            if result.available_modes == ("clean_break",)
+            else None if result.candidate_count > 0 else "no_transition_candidates"
+        )
         return TransitionEdge(
             id=f"edge-{result.cache_key[:16]}",
             source_track_id=source_track_id,

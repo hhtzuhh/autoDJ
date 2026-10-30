@@ -142,7 +142,7 @@ class TransitionPipelineTest(unittest.TestCase):
         self.assertEqual(calls, 12)
         self.assertEqual(len(edges), 9)
 
-    def test_incompatible_tempo_is_a_blocked_edge(self) -> None:
+    def test_incompatible_tempo_prepares_clean_break_without_enabling_sync_pair(self) -> None:
         target_id = self.track_ids[1]
         target_path = self.catalog.tracks[target_id].analysis_path
         target = json.loads(target_path.read_text(encoding="utf-8"))
@@ -156,9 +156,12 @@ class TransitionPipelineTest(unittest.TestCase):
 
         _, edges = pipeline.set_queue(self.track_ids[:2])
 
-        self.assertEqual(edges[0].status, "blocked")
-        self.assertEqual(edges[0].candidate_count, 0)
-        self.assertEqual(edges[0].reason, "no_compatible_candidates")
+        self.assertEqual(edges[0].status, "analyzed")
+        self.assertEqual(edges[0].candidate_count, 1)
+        self.assertEqual(edges[0].reason, "clean_break_required")
+        payload = pipeline.cache.payload(self.track_ids[0], target_id)
+        self.assertEqual(payload["pairs"], [])
+        self.assertEqual(payload["clean_break_pairs"][0]["transition_mode"], "clean_break")
 
     def test_queue_supports_more_than_ten_tracks(self) -> None:
         analysis_root = self.root / "large-analysis"

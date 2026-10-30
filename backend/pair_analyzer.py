@@ -6,7 +6,7 @@ from statistics import mean
 from typing import Any
 
 
-PAIR_VERSION = "cue-pair-v3"
+PAIR_VERSION = "cue-pair-v5"
 MAX_TEMPO_CHANGE_FRACTION = 0.06
 TRANSITION_BAR_OPTIONS = (2, 4, 8)
 
@@ -150,6 +150,7 @@ def build_pairs(
     source_bar_seconds = _median_bar_seconds(source)
     target_bar_seconds = _median_bar_seconds(target)
     pairs: list[dict[str, Any]] = []
+    clean_break_pairs: list[dict[str, Any]] = []
 
     for exit_candidate in source["candidates"]["exit"]:
         source_lengths = set(
@@ -168,22 +169,53 @@ def build_pairs(
                 )
             )
             lengths = sorted(source_lengths & target_lengths)
-            if not tempo_compatible or not lengths:
+            if not lengths:
                 continue
-            metrics_by_bars = {
-                str(bars): _transition_metrics(
-                    source,
-                    exit_candidate,
-                    target,
-                    entry_candidate,
-                    bars,
+            if not tempo_compatible:
+                clean_break_pairs.append(
+                    {
+                        "a_exit": {
+                            "rank": int(exit_candidate["rank"]),
+                            "beat_index": int(exit_candidate["beat_index"]),
+                            "time_seconds": float(exit_candidate["time_seconds"]),
+                            "score": float(exit_candidate["score"]),
+                        },
+                        "b_entry": {
+                            "rank": int(entry_candidate["rank"]),
+                            "beat_index": int(entry_candidate["beat_index"]),
+                            "time_seconds": float(entry_candidate["time_seconds"]),
+                            "score": float(entry_candidate["score"]),
+                        },
+                        "transition_mode": "clean_break",
+                        "handoff_options": ["phrase_boundary_cut"],
+                        "transition_bar_options": [],
+                        "transition_metrics_by_bars": {},
+                        "b_tempo_change_fraction": target_tempo_change,
+                        "best_strategy_for_two_bars": "clean_break",
+                        "heuristic_score": float(
+                            0.45 * float(exit_candidate["score"])
+                            + 0.45 * float(entry_candidate["score"])
+                            + 0.10 * float(entry_candidate.get("boundary_change", 0.0))
+                        ),
+                    }
                 )
-                for bars in lengths
-            }
+                continue
+            try:
+                metrics_by_bars = {
+                    str(bars): _transition_metrics(
+                        source,
+                        exit_candidate,
+                        target,
+                        entry_candidate,
+                        bars,
+                    )
+                    for bars in lengths
+                }
+            except ValueError:
+                continue
             baseline = metrics_by_bars.get("2") or metrics_by_bars[str(lengths[0])]
             best_strategy = str(baseline["best_strategy"])
-            pairs.append(
-                {
+            candidate = {
                     "a_exit": {
                         "rank": int(exit_candidate["rank"]),
                         "beat_index": int(exit_candidate["beat_index"]),
@@ -199,12 +231,19 @@ def build_pairs(
                     "transition_bar_options": lengths,
                     "transition_metrics_by_bars": metrics_by_bars,
                     "b_tempo_change_fraction": target_tempo_change,
-                    "best_strategy_for_two_bars": best_strategy,
+                    "transition_mode": (
+                        "beat_sync_crossfade" if tempo_compatible else "clean_break"
+                    ),
+                    "best_strategy_for_two_bars": (
+                        best_strategy if tempo_compatible else "clean_break"
+                    ),
                     "heuristic_score": float(
-                        baseline["strategy_scores"][best_strategy]
+                        baseline["strategy_scores"][
+                            best_strategy if tempo_compatible else "clean_break"
+                        ]
                     ),
                 }
-            )
+            pairs.append(candidate)
 
     ranked = sorted(
         pairs,
@@ -213,6 +252,13 @@ def build_pairs(
     )
     kept = ranked[:limit]
     for rank, pair in enumerate(kept, start=1):
+        pair["rank"] = rank
+    clean_break_kept = sorted(
+        clean_break_pairs,
+        key=lambda item: float(item["heuristic_score"]),
+        reverse=True,
+    )[:limit]
+    for rank, pair in enumerate(clean_break_kept, start=1):
         pair["rank"] = rank
     return {
         "tempo": {
@@ -224,6 +270,7 @@ def build_pairs(
             "compatible": tempo_compatible,
         },
         "pairs": kept,
+        "clean_break_pairs": clean_break_kept,
         "evaluated_pair_count": len(source["candidates"]["exit"])
         * len(target["candidates"]["entry"]),
     }

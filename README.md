@@ -30,7 +30,10 @@ separately validated local prototype.
   adjacent pair caches. Dragging a prepared track preserves unchanged edges
   and schedules only new adjacencies. Once measured BPM is available, a
   second bounded Meta pass may reorder the set; local code accepts it only
-  when it reduces blocked adjacencies. Prepared sets remain separate from the
+  when it reduces difficult adjacencies. Large BPM gaps produce explicit
+  `clean_break` candidates instead of being discarded. Those candidates make
+  preparation analysis ready, but are kept out of the existing beat-sync
+  planner until a clean-break executor is implemented. Prepared sets remain separate from the
   currently executing Mixxx queue until a safe activation boundary is built.
 - The live bridge exposes separate **Plan with Meta** and **Approve & arm**
   actions. Planning makes one model request, validates the returned candidate
@@ -182,7 +185,10 @@ python -m unittest discover -s backend -p 'test_*.py' -v
 
 The tests verify that a ten-track queue creates nine directional pair analyses,
 reordering builds only new adjacent edges, caches are reused, incompatible
-tempo is blocked, and queues longer than ten tracks remain supported. They
+tempo produces clean-break candidates without entering the sync planner, and
+queues longer than ten tracks remain supported. A mock asynchronous acceptance
+test also verifies that a request with initially unanalyzed tracks reaches
+analysis-ready within a five-second deadline without invoking All-In-One.
 also verify bounded, temporally feasible A–B–C construction, strict Meta output
 validation, exactly one model call, compilation into the executor plan shape,
 and exact playlist generation from hash-verified local audio.

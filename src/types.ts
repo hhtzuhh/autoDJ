@@ -121,6 +121,7 @@ export interface CopilotState {
     transitions: TransitionEdge[];
     catalogCount: number;
     activationReady: boolean;
+    preparationReady: boolean;
     postAnalysisPlanning: "idle" | "pending" | "running" | "completed" | "failed";
     updatedAt: string;
   };

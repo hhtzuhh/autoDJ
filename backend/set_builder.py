@@ -18,6 +18,7 @@ import threading
 from typing import Any, Callable, Iterable
 
 from meta_planner import MetaConfig, OpenAICompatibleTransport
+from pair_analyzer import PAIR_VERSION
 from transition_pipeline import AnalysisCatalog, PairAnalysisCache, adjacent_pairs, utc_now
 
 
@@ -195,7 +196,7 @@ class SetBuilderService:
         curator: Callable[[tuple[CatalogTrack, ...], str, int], tuple[tuple[str, ...], str]] | None = None,
         post_curator: Callable[[tuple[CatalogTrack, ...], str, int], tuple[tuple[str, ...], str]] | None = None,
         analyzer: Callable[[CatalogTrack], None] | None = None,
-        pair_builder: Callable[[str, str], int] | None = None,
+        pair_builder: Callable[[str, str], int | tuple[int, str | None]] | None = None,
         start_worker: bool = True,
     ) -> None:
         self.workspace = workspace.resolve()
@@ -235,20 +236,29 @@ class SetBuilderService:
             "transitions": [],
             "updatedAt": utc_now(),
             "activationReady": False,
+            "preparationReady": False,
             "postAnalysisPlanning": "idle",
+            "pairAnalysisVersion": PAIR_VERSION,
         }
         if self.state_path.exists():
             saved = json.loads(self.state_path.read_text(encoding="utf-8"))
             saved_ids = [str(value) for value in saved.get("orderedTrackIds", [])]
             if saved_ids and all(track_id in self.catalog for track_id in saved_ids):
+                pair_version_changed = saved.get("pairAnalysisVersion") != PAIR_VERSION
                 state.update(saved)
+                state["pairAnalysisVersion"] = PAIR_VERSION
                 state["trackStatuses"] = {
                     track_id: self.catalog[track_id].analysis_status for track_id in self.catalog
                 }
                 self._refresh_edges(state)
                 for edge in state["transitions"]:
-                    if edge["status"] in {"analyzing", "planning"}:
+                    if pair_version_changed or edge["status"] in {"analyzing", "planning"}:
                         edge["status"] = "pending"
+                        edge["candidateCount"] = 0
+                        edge["reason"] = None
+                if pair_version_changed:
+                    state["postAnalysisPlanning"] = "idle"
+                    state["error"] = None
         return state
 
     def _meta_curator(
@@ -312,10 +322,15 @@ class SetBuilderService:
         )
         return self._meta_curator(tracks, request, count)
 
-    def _build_pair(self, source_id: str, target_id: str) -> int:
+    def _build_pair(self, source_id: str, target_id: str) -> tuple[int, str | None]:
         catalog = AnalysisCatalog.from_root(self.analysis_root)
         result = PairAnalysisCache(self.pair_root, catalog).ensure(source_id, target_id)
-        return result.candidate_count
+        reason = (
+            "clean_break_required"
+            if result.available_modes == ("clean_break",)
+            else None
+        )
+        return result.candidate_count, reason
 
     def _persist(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -380,7 +395,10 @@ class SetBuilderService:
         if (
             tracks_ready
             and edges_settled
-            and any(edge["status"] == "blocked" for edge in self.state["transitions"])
+            and any(
+                edge["status"] == "blocked" or edge.get("reason") == "clean_break_required"
+                for edge in self.state["transitions"]
+            )
             and self.state.get("postAnalysisPlanning") in {"idle", "pending"}
         ):
             self.state["postAnalysisPlanning"] = "pending"
@@ -404,10 +422,19 @@ class SetBuilderService:
         edges_ready = len(self.state["transitions"]) == max(0, len(ordered) - 1) and all(
             edge["status"] == "analyzed" for edge in self.state["transitions"]
         )
-        self.state["activationReady"] = tracks_ready and edges_ready
+        needs_post_plan = any(
+            edge.get("reason") == "clean_break_required" for edge in self.state["transitions"]
+        )
+        post_plan_ready = (
+            not needs_post_plan
+            or self.state.get("postAnalysisPlanning") in {"completed", "failed"}
+        )
+        preparation_ready = tracks_ready and edges_ready and post_plan_ready
+        self.state["preparationReady"] = preparation_ready
+        self.state["activationReady"] = preparation_ready and not needs_post_plan
         if self.state.get("error"):
             self.state["status"] = "error"
-        elif self.state["activationReady"]:
+        elif self.state["preparationReady"]:
             self.state["status"] = "ready"
         elif self.state.get("postAnalysisPlanning") == "running":
             self.state["status"] = "planning"
@@ -559,13 +586,14 @@ class SetBuilderService:
             edge["status"] = "analyzing"
             self._persist()
         try:
-            count = self.pair_builder(source_id, target_id)
+            result = self.pair_builder(source_id, target_id)
+            count, strategy_reason = result if isinstance(result, tuple) else (result, None)
             with self.lock:
                 edge = self._find_edge(source_id, target_id)
                 if edge is not None:
                     edge["candidateCount"] = int(count)
                     edge["status"] = "analyzed" if count else "blocked"
-                    edge["reason"] = None if count else "no_compatible_candidates"
+                    edge["reason"] = strategy_reason if count else "no_transition_candidates"
                 self._schedule_current()
                 self._recompute_status()
                 self._persist()
@@ -593,14 +621,19 @@ class SetBuilderService:
         try:
             ordered, reason = self.post_curator(tracks, prompt, len(tracks))
             after_blocked = self._blocked_count(ordered)
-            if after_blocked >= before_blocked:
+            if after_blocked > before_blocked:
                 raise ValueError(
-                    f"post-analysis order did not improve blocked edges ({before_blocked} → {after_blocked})"
+                    f"post-analysis order made tempo bridges worse ({before_blocked} → {after_blocked})"
                 )
             with self.lock:
                 self.state["postAnalysisPlanning"] = "completed"
                 self.state["reason"] = reason
-                self.reorder(ordered)
+                self.state["error"] = None
+                if ordered != current:
+                    self.reorder(ordered)
+                else:
+                    self._recompute_status()
+                    self._persist()
         except Exception as error:
             with self.lock:
                 self.state["postAnalysisPlanning"] = "failed"

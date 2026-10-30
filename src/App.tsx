@@ -373,6 +373,9 @@ function QueuePanel({
             <span>{builder?.catalogCount ?? 0} local tracks</span>
             {builder?.model && <span>{builder.model}</span>}
             {builder?.activationReady && <strong>Ready to activate</strong>}
+            {builder?.preparationReady && !builder.activationReady && (
+              <strong>Analysis ready · executor pending</strong>
+            )}
           </div>
           {builderNotice && (
             <p className={builder?.error ? "set-builder__message is-error" : "set-builder__message"}>
@@ -441,7 +444,7 @@ function TransitionReadiness({ edge }: { edge: TransitionEdge }) {
       {selectedBy && <span>{selectedBy}</span>}
       {nextTiming && <small>{nextTiming}</small>}
       <small>{edge.candidateCount} candidates</small>
-      {edge.reason && <small title={edge.reason}>details</small>}
+      {edge.reason && <small title={edge.reason}>{edge.reason.replaceAll("_", " ")}</small>}
     </div>
   );
 }
