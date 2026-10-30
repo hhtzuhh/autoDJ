@@ -189,7 +189,9 @@ contract and connects Arm and Takeover to the local lifecycle supervisor.
 - The model never sends beat-by-beat Mixxx commands.
 - Local code owns identity, timing, queue revision, and lifecycle validation.
 - Invalid, late, or unavailable plans do not interrupt the current song.
-- Human transport, seek, loop, or mixer actions take priority.
+- Human transport, seek, loop, and crossfader actions take priority.
+- Pre-transition Deck volume, Low EQ, and filter shaping preserve the timed
+  cue; the same channel controls at or after transition start become takeover.
 - Private development tracks, credentials, recordings, model caches, and
   generated artifacts are not part of this repository.
 
