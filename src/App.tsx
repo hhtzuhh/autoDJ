@@ -455,6 +455,26 @@ function App() {
       if (!response.ok) {
         throw new Error(payload.error ?? `Bridge returned ${response.status}`);
       }
+      if (action === "takeover" && payload.status === "cancelled") {
+        setState((current) => ({
+          ...current,
+          plan: {
+            ...current.plan,
+            status: "cancelled",
+            invalidationReason:
+              payload.invalidation_reason ?? "human_dashboard_takeover",
+          },
+          events: [
+            event(
+              `evt-${Date.now()}-takeover`,
+              "human",
+              "Human takeover",
+              "Future automation stopped. Current playback and mixer state are preserved.",
+            ),
+            ...current.events,
+          ],
+        }));
+      }
       setActionNotice(payload.message ?? `${action} accepted`);
     } catch (error) {
       setActionNotice(

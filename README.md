@@ -50,10 +50,10 @@ Then open:
 http://127.0.0.1:5173/?source=live
 ```
 
-Live Deck state is read-only. The Arm action never sends MIDI directly: it
-first creates a unique plan instance and delegates identity, queue revision,
-transport, target-stop, and latest-arm checks to the existing lifecycle
-supervisor. Failed preconditions return HTTP 409 and leave Mixxx untouched.
+Observed Deck state is never overwritten directly. The Arm action never sends
+MIDI directly: it first creates a unique plan instance and delegates identity,
+queue revision, transport, target-stop, and latest-arm checks to the existing
+lifecycle supervisor. Failed preconditions return HTTP 409 and leave Mixxx untouched.
 Takeover is enabled only for a dashboard-owned plan in `executing` state and
 uses the existing preserve-playback cancellation signal.
 
@@ -69,6 +69,13 @@ ran the two-bar transition, stopped the source, restored sync and tempo state,
 and exited successfully. The final observer state showed Boomerang playing on
 Deck 1, Bass Addict stopped on Deck 2, crossfader at Deck 1, and plan status
 `completed` at performance revision 19.
+
+Takeover acceptance on 2026-10-30 triggered the dashboard action during an
+active fade. The API immediately returned `cancelled` with reason
+`human_dashboard_takeover`; the executor consumed the plan-specific preserve
+signal and exited successfully. Seven seconds later both Decks were still
+playing, their leader/follower sync roles were unchanged, and the crossfader
+remained at its handoff position. No stop or cleanup command followed.
 
 For a production build:
 

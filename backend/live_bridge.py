@@ -148,18 +148,18 @@ class LiveStateStore:
 
     def request_takeover(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
-            if not self.supervisor or not self.supervisor.manager:
+            if not self.supervisor:
                 return 409, {"error": "no dashboard-owned plan is executing"}
+            accepted, reason = self.supervisor.request_takeover()
+            if not accepted:
+                return 409, {"error": reason}
+            self.envelope = self._load_envelope()
             manager = self.supervisor.manager
-            if manager.envelope.status != "executing":
-                return 409, {
-                    "error": f"plan status is {manager.envelope.status}, not executing"
-                }
-            manager.invalidate("human_dashboard_takeover")
-            self.supervisor._persist()
             return 202, {
                 "accepted": True,
                 "plan_id": manager.envelope.plan_id,
+                "status": manager.envelope.status,
+                "invalidation_reason": manager.envelope.invalidation_reason,
                 "message": "Future automation cancelled; current playback is preserved.",
             }
 
