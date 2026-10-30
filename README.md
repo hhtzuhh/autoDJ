@@ -50,15 +50,25 @@ Then open:
 http://127.0.0.1:5173/?source=live
 ```
 
-The live mode is currently read-only. It proves synchronization without
-exposing playback writes before lifecycle and takeover checks are wired to the
-product boundary.
+Live Deck state is read-only. The Arm action never sends MIDI directly: it
+first creates a unique plan instance and delegates identity, queue revision,
+transport, target-stop, and latest-arm checks to the existing lifecycle
+supervisor. Failed preconditions return HTTP 409 and leave Mixxx untouched.
+Takeover is enabled only for a dashboard-owned plan in `executing` state and
+uses the existing preserve-playback cancellation signal.
 
 Live acceptance on 2026-10-30 observed Mixxx Deck 1 playing Boomerang. The
 bridge reported beat 209 at 95.410 seconds; the React view subsequently showed
 beat 216 at approximately 98 seconds, performance revision 10, queue revision
-3, and the same human seek/play/crossfader events. This verifies the read path;
-it does not yet verify product write controls.
+3, and the same human seek/play/crossfader events. This verifies the read path.
+
+Write acceptance on 2026-10-30 first confirmed that Arm returned HTTP 409 and
+did not touch Mixxx while the target deck was empty. With both analyzed tracks
+loaded, the bridge accepted a unique plan instance, precisely cued the target,
+ran the two-bar transition, stopped the source, restored sync and tempo state,
+and exited successfully. The final observer state showed Boomerang playing on
+Deck 1, Bass Addict stopped on Deck 2, crossfader at Deck 1, and plan status
+`completed` at performance revision 19.
 
 For a production build:
 
@@ -76,8 +86,8 @@ npm run preview
 5. Select **Take over** at any time. Future automation is cancelled while
    current playback and mixer state are preserved.
 
-This is currently a UI simulation. Live adapters will produce the same typed
-contract without changing the visual layer.
+Without `?source=live`, this is a UI simulation. Live mode uses the same typed
+contract and connects Arm and Takeover to the local lifecycle supervisor.
 
 ## Safety and product boundaries
 

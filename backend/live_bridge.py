@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from copy import deepcopy
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 import re
 import sys
 import threading
+import time
 from typing import Any
 
 
@@ -48,6 +50,9 @@ class LiveStateStore:
         self.state: dict[str, Any] | None = None
         self.error: str | None = None
         self.events: deque[dict[str, Any]] = deque(maxlen=20)
+        self.raw_performance: Any | None = None
+        self.supervisor: Any | None = None
+        self.action_lock = threading.Lock()
         self.queue = load_json(
             workspace / "artifacts/live-performance/queue-state-v1.json"
         )
@@ -68,8 +73,14 @@ class LiveStateStore:
         raise FileNotFoundError("no live or rolling selection artifact is available")
 
     def _load_envelope(self) -> dict[str, Any] | None:
-        path = self.workspace / "artifacts/live-performance/live-replan-envelope-v1.json"
-        return load_json(path) if path.exists() else None
+        runtime = self.workspace / "artifacts/live-performance"
+        for path in (
+            runtime / "dashboard-active-envelope-v1.json",
+            runtime / "live-replan-envelope-v1.json",
+        ):
+            if path.exists():
+                return load_json(path)
+        return None
 
     def _load_catalog(self) -> dict[str, dict[str, Any]]:
         root = self.workspace / "artifacts/time-map"
@@ -86,6 +97,71 @@ class LiveStateStore:
     def snapshot(self) -> tuple[dict[str, Any] | None, str | None]:
         with self.lock:
             return self.state, self.error
+
+    def request_arm(self) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self.raw_performance is None:
+                return 503, {"error": "Mixxx performance snapshot is unavailable"}
+            if self.supervisor and self.supervisor.executor is not None:
+                return 409, {"error": "a transition executor is already active"}
+
+            live_selection = deepcopy(self._load_selection())
+            plan = live_selection["next_executable_plan"]
+            unique = f"dashboard-{int(time.time() * 1000)}"
+            plan["plan_id"] = f"{plan['plan_id']}-{unique}"
+            live_selection["source_window_id"] = (
+                f"{live_selection['source_window_id']}-{unique}"
+            )
+
+            live_root = self.workspace / "experiments/live-performance"
+            if str(live_root) not in sys.path:
+                sys.path.insert(0, str(live_root))
+            from lifecycle_supervisor import LifecycleSupervisor
+            from plan_lifecycle import PerformanceSnapshot
+            from queue_service import QueueStore
+
+            runtime = self.workspace / "artifacts/live-performance"
+            supervisor = LifecycleSupervisor(
+                selection=live_selection,
+                queue_store=QueueStore(runtime / "queue-state-v1.json"),
+                envelope_path=runtime / "dashboard-active-envelope-v1.json",
+                executor_plan_path=runtime / "dashboard-executor-plan-v1.json",
+                launch_executor=True,
+            )
+            performance = PerformanceSnapshot.from_observer_state(
+                self.raw_performance
+            )
+            reason = supervisor._wait_reason(performance)
+            if reason:
+                return 409, {
+                    "error": reason,
+                    "message": "Mixxx was not changed because local preconditions failed.",
+                }
+            self.selection = live_selection
+            self.envelope = None
+            self.supervisor = supervisor
+            return 202, {
+                "accepted": True,
+                "plan_id": plan["plan_id"],
+                "message": "Plan passed preflight and is waiting for the observer lifecycle update.",
+            }
+
+    def request_takeover(self) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if not self.supervisor or not self.supervisor.manager:
+                return 409, {"error": "no dashboard-owned plan is executing"}
+            manager = self.supervisor.manager
+            if manager.envelope.status != "executing":
+                return 409, {
+                    "error": f"plan status is {manager.envelope.status}, not executing"
+                }
+            manager.invalidate("human_dashboard_takeover")
+            self.supervisor._persist()
+            return 202, {
+                "accepted": True,
+                "plan_id": manager.envelope.plan_id,
+                "message": "Future automation cancelled; current playback is preserved.",
+            }
 
     def _track(self, track_id: str, index: int) -> dict[str, Any]:
         analysis = self.catalog.get(track_id, {})
@@ -231,6 +307,12 @@ class LiveStateStore:
         with self.lock:
             self.state = live_state
             self.error = None
+            self.raw_performance = performance
+
+        supervisor = self.supervisor
+        if supervisor is not None:
+            supervisor.update(performance, observed_events)
+            self.envelope = self._load_envelope()
 
 
 def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
@@ -268,6 +350,24 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                     )
                 else:
                     self._json(200, state)
+                return
+            self._json(404, {"error": "not found"})
+
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/api/arm":
+                status, payload = store.request_arm()
+                self._json(status, payload)
+                return
+            if self.path == "/api/takeover":
+                status, payload = store.request_takeover()
+                self._json(status, payload)
                 return
             self._json(404, {"error": "not found"})
 

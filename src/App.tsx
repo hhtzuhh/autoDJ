@@ -251,6 +251,8 @@ function App() {
   const [state, setState] = useState<CopilotState>(initialState);
   const [isReplanning, setIsReplanning] = useState(false);
   const [bridgeError, setBridgeError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
   const liveRequested = useMemo(
     () => new URLSearchParams(window.location.search).get("source") === "live",
     [],
@@ -442,6 +444,27 @@ function App() {
     });
   };
 
+  const sendLiveAction = async (action: "arm" | "takeover") => {
+    setActionPending(true);
+    setActionNotice(null);
+    try {
+      const response = await fetch(`http://127.0.0.1:8765/api/${action}`, {
+        method: "POST",
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? `Bridge returned ${response.status}`);
+      }
+      setActionNotice(payload.message ?? `${action} accepted`);
+    } catch (error) {
+      setActionNotice(
+        `Rejected: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setActionPending(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -499,9 +522,12 @@ function App() {
           <span>{state.dataSource === "live" ? "Live observer" : "Demo controls"}</span>
           <p>
             {state.dataSource === "live"
-              ? "Read-only Mixxx sync is active. Write controls remain locked."
+              ? "Live Mixxx sync is active. Arm and takeover stay behind local lifecycle checks."
               : "Every action is labeled simulation until the live adapter is connected."}
           </p>
+          {state.dataSource === "live" && actionNotice && (
+            <small className="action-notice">{actionNotice}</small>
+          )}
         </div>
         {state.dataSource === "simulation" ? (
           <div className="control-dock__actions">
@@ -532,8 +558,19 @@ function App() {
             >
               Open simulation
             </button>
-            <button className="button button--live" disabled>
-              <Icon name="radio" /> Observer only
+            <button
+              className="button button--primary"
+              disabled={actionPending}
+              onClick={() => void sendLiveAction("arm")}
+            >
+              <Icon name="play" /> Approve & arm
+            </button>
+            <button
+              className="button button--danger"
+              disabled={actionPending || state.plan.status !== "executing"}
+              onClick={() => void sendLiveAction("takeover")}
+            >
+              Take over
             </button>
           </div>
         )}
