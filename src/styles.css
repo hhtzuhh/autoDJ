@@ -130,7 +130,10 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .deck-metrics b { color: #dddfea; font-weight: 500; }
 .empty-deck { height: 170px; display: grid; place-items: center; color: var(--muted); }
 
-.workspace-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.workspace-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "plan queue" "events queue"; align-items: start; gap: 16px; margin-top: 16px; }
+.plan-panel { grid-area: plan; }
+.queue-panel { grid-area: queue; align-self: stretch; }
+.workspace-grid > .event-panel { grid-area: events; margin-top: 0; }
 .panel { padding: 22px; }
 .panel__header { justify-content: space-between; margin-bottom: 20px; }
 .panel__header h2 { margin: 0; font-size: 20px; letter-spacing: -.025em; }
@@ -176,18 +179,18 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .warning-callout strong { font-size: 12px; color: var(--red); }
 .warning-callout span { color: var(--muted); font-size: 11px; }
 
-.queue-list { max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.16) transparent; }
-.queue-row { min-height: 42px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 6px 9px; border-bottom: 1px solid rgba(255,255,255,.045); color: var(--muted); }
+.queue-list { max-height: min(64vh, 680px); overflow-y: auto; display: flex; flex-direction: column; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.16) transparent; }
+.queue-row { min-height: 50px; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,.045); color: var(--muted); }
 .queue-item:last-child .queue-row { border-bottom: 0; }
 .queue-row--current { color: #f3f4f8; background: rgba(169,138,255,.08); box-shadow: inset 2px 0 var(--violet); }
 .queue-row--played { opacity: .55; }
-.queue-row__number { font: 500 10px "DM Mono", monospace; text-align: center; }
+.queue-row__number { font: 500 11px "DM Mono", monospace; text-align: center; }
 .queue-row__number svg { color: var(--violet); vertical-align: middle; }
 .queue-row__identity { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
-.queue-row__identity strong { min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.queue-row__identity span { flex: 0 0 auto; font: 400 9px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
-.queue-row__state { font: 400 9px "DM Mono", monospace; text-transform: uppercase; }
-.transition-edge { min-height: 21px; margin-left: 18px; padding: 3px 9px 3px 20px; display: flex; align-items: center; gap: 7px; color: var(--muted); font: 500 8px "DM Mono", monospace; text-transform: uppercase; position: relative; }
+.queue-row__identity strong { min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue-row__identity span { flex: 0 0 auto; font: 400 10px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
+.queue-row__state { font: 400 10px "DM Mono", monospace; text-transform: uppercase; }
+.transition-edge { min-height: 24px; margin-left: 20px; padding: 4px 10px 4px 21px; display: flex; align-items: center; gap: 8px; color: var(--muted); font: 500 9px "DM Mono", monospace; text-transform: uppercase; position: relative; }
 .transition-edge::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 8px; width: 1px; background: var(--line); }
 .transition-edge i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
 .transition-edge span + span, .transition-edge small { padding-left: 7px; border-left: 1px solid var(--line); }
@@ -233,6 +236,8 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
   .topbar__status .connection, .revision { display: none; }
   main { width: min(100% - 32px, 760px); }
   .deck-grid, .workspace-grid { grid-template-columns: 1fr; }
+  .workspace-grid { grid-template-areas: "plan" "queue" "events"; }
+  .queue-list { max-height: 420px; }
   .hero-strip { padding-top: 8px; }
   .control-dock { align-items: flex-start; flex-direction: column; }
   .control-dock__actions { width: 100%; }

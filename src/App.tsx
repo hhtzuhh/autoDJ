@@ -551,9 +551,8 @@ function App() {
         <div className="workspace-grid">
           <PlanPanel state={state} />
           <QueuePanel state={state} />
+          <EventLog events={state.events} />
         </div>
-
-        <EventLog events={state.events} />
       </main>
 
       <footer className="control-dock">
