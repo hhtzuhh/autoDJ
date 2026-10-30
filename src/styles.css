@@ -131,7 +131,7 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .deck-metrics b { color: #dddfea; font-weight: 500; }
 .empty-deck { height: 170px; display: grid; place-items: center; color: var(--muted); }
 
-.workspace-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(330px, .8fr); gap: 16px; margin-top: 16px; }
+.workspace-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
 .panel { padding: 22px; }
 .panel__header { justify-content: space-between; margin-bottom: 20px; }
 .panel__header h2 { margin: 0; font-size: 20px; letter-spacing: -.025em; }
