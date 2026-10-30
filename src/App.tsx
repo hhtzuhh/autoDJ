@@ -76,12 +76,8 @@ function DeckCard({ deck }: { deck: DeckState }) {
       {deck.track ? (
         <>
           <div className="deck-card__identity">
-            <div className={`album album--${deck.track.accent}`}>
-              <span>{deck.track.title.slice(0, 1)}</span>
-            </div>
             <div>
               <h3>{deck.track.title}</h3>
-              <p>{deck.track.artist}</p>
             </div>
           </div>
           <Waveform progress={progress} accent={deck.track.accent} />
@@ -196,15 +192,16 @@ function QueuePanel({ state }: { state: CopilotState }) {
         </div>
         <span className="count-badge">{state.queue.length} tracks</span>
       </div>
-      <div className="queue-list">
+      <div className="queue-list" role="list" aria-label="Performance queue">
         {state.queue.map((track, index) => (
-          <div className={`queue-row queue-row--${track.state}`} key={track.id}>
+          <div
+            className={`queue-row queue-row--${track.state}`}
+            key={track.id}
+            role="listitem"
+          >
             <span className="queue-row__number">
               {track.state === "current" ? <Icon name="play" /> : index + 1}
             </span>
-            <div className={`album album--small album--${track.accent}`}>
-              {track.title.slice(0, 1)}
-            </div>
             <div className="queue-row__identity">
               <strong>{track.title}</strong>
               <span>{track.bpm} BPM · {track.energy}</span>
