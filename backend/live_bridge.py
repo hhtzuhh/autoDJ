@@ -23,6 +23,18 @@ import time
 from typing import Any
 
 
+BACKEND_ROOT = Path(__file__).resolve().parent
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+from transition_pipeline import (  # noqa: E402
+    AnalysisCatalog,
+    PairAnalysisCache,
+    QueueSnapshot,
+    TransitionPipeline,
+    VersionedQueue,
+)
+
+
 DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 8765
 ACCENTS = ("cyan", "violet", "amber")
@@ -55,6 +67,24 @@ class LiveStateStore:
         self.action_lock = threading.Lock()
         self.queue = load_json(
             workspace / "artifacts/live-performance/queue-state-v1.json"
+        )
+        analysis_catalog = AnalysisCatalog.from_root(
+            workspace / "artifacts/time-map"
+        )
+        queue_snapshot = QueueSnapshot(
+            revision=int(self.queue["revision"]),
+            ordered_track_ids=tuple(self.queue["ordered_track_ids"]),
+            updated_at=str(self.queue["updated_at"]),
+        )
+        transition_pipeline = TransitionPipeline(
+            VersionedQueue(analysis_catalog, queue_snapshot),
+            PairAnalysisCache(
+                workspace / "artifacts/live-performance/dashboard-pairs",
+                analysis_catalog,
+            ),
+        )
+        _, self.transition_edges = transition_pipeline.set_queue(
+            queue_snapshot.ordered_track_ids
         )
         self.selection = self._load_selection()
         self.envelope = self._load_envelope()
@@ -293,6 +323,22 @@ class LiveStateStore:
             "invalidationReason": invalidation_reason,
         }
 
+        transitions = []
+        for edge in self.transition_edges:
+            payload = edge.to_dict()
+            if (
+                edge.source_track_id == plan["sourceTrackId"]
+                and edge.target_track_id == plan["targetTrackId"]
+            ):
+                if plan_status in {"draft", "ready", "armed", "executing"}:
+                    payload["status"] = "ready"
+                    payload["selectedBy"] = selected_by
+                elif plan_status in {"invalidated", "cancelled"}:
+                    payload["status"] = "invalidated"
+                    payload["selectedBy"] = selected_by
+                    payload["reason"] = invalidation_reason
+            transitions.append(payload)
+
         live_state = {
             "dataSource": "live",
             "connected": True,
@@ -301,6 +347,7 @@ class LiveStateStore:
             "crossfader": float(performance.crossfader or 0),
             "decks": decks,
             "queue": queue,
+            "transitions": transitions,
             "plan": plan,
             "events": list(self.events),
         }

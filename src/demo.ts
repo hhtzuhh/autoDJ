@@ -82,6 +82,28 @@ export const initialState: CopilotState = {
     },
   ],
   queue,
+  transitions: [
+    {
+      id: "fixture-edge-boots-bass",
+      sourceTrackId: tracks.boots.id,
+      targetTrackId: tracks.bass.id,
+      status: "analyzed",
+      candidateCount: 25,
+      selectedBy: null,
+      reason: null,
+      queueRevision: 3,
+    },
+    {
+      id: "fixture-edge-bass-boomerang",
+      sourceTrackId: tracks.bass.id,
+      targetTrackId: tracks.boomerang.id,
+      status: "ready",
+      candidateCount: 25,
+      selectedBy: "fixture",
+      reason: "Demo-only selection; no live model call was made.",
+      queueRevision: 3,
+    },
+  ],
   plan: {
     id: "fixture-q3-bass-boomerang",
     status: "ready",
@@ -124,4 +146,3 @@ export const initialState: CopilotState = {
     },
   ],
 };
-

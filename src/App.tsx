@@ -6,6 +6,7 @@ import type {
   LifecycleStatus,
   PerformanceEvent,
   Track,
+  TransitionEdge,
 } from "./types";
 
 const waveform = [
@@ -183,6 +184,15 @@ function PlanPanel({ state }: { state: CopilotState }) {
 }
 
 function QueuePanel({ state }: { state: CopilotState }) {
+  const transitions =
+    state.transitions
+    ?? (state.dataSource === "simulation" ? initialState.transitions : []);
+  const edgeAfter = new Map(
+    transitions.map((transition) => [
+      transition.sourceTrackId,
+      transition,
+    ]),
+  );
   return (
     <section className="panel queue-panel">
       <div className="panel__header">
@@ -193,28 +203,43 @@ function QueuePanel({ state }: { state: CopilotState }) {
         <span className="count-badge">{state.queue.length} tracks</span>
       </div>
       <div className="queue-list" role="list" aria-label="Performance queue">
-        {state.queue.map((track, index) => (
-          <div
-            className={`queue-row queue-row--${track.state}`}
-            key={track.id}
-            role="listitem"
-          >
-            <span className="queue-row__number">
-              {track.state === "current" ? <Icon name="play" /> : index + 1}
-            </span>
-            <div className="queue-row__identity">
-              <strong>{track.title}</strong>
-              <span>{track.bpm} BPM · {track.energy}</span>
+        {state.queue.map((track, index) => {
+          const transition = edgeAfter.get(track.id);
+          return (
+            <div className="queue-item" key={track.id} role="listitem">
+              <div className={`queue-row queue-row--${track.state}`}>
+                <span className="queue-row__number">
+                  {track.state === "current" ? <Icon name="play" /> : index + 1}
+                </span>
+                <div className="queue-row__identity">
+                  <strong>{track.title}</strong>
+                  <span>{track.bpm} BPM · {track.energy}</span>
+                </div>
+                <span className="queue-row__state">{track.state}</span>
+              </div>
+              {transition && <TransitionReadiness edge={transition} />}
             </div>
-            <span className="queue-row__state">{track.state}</span>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div className="queue-note">
         <Icon name="shield" />
         <p>Only adjacent pairs are analyzed. Reordering invalidates affected edges.</p>
       </div>
     </section>
+  );
+}
+
+function TransitionReadiness({ edge }: { edge: TransitionEdge }) {
+  const selectedBy = edge.selectedBy?.replace("deterministic_fallback", "fallback");
+  return (
+    <div className={`transition-edge transition-edge--${edge.status}`}>
+      <i />
+      <span>{edge.status}</span>
+      {selectedBy && <span>{selectedBy}</span>}
+      <small>{edge.candidateCount} candidates</small>
+      {edge.reason && <small title={edge.reason}>details</small>}
+    </div>
   );
 }
 

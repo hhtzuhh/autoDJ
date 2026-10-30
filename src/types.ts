@@ -33,6 +33,26 @@ export interface QueueItem extends Track {
   state: "played" | "current" | "next" | "queued";
 }
 
+export type TransitionEdgeStatus =
+  | "pending"
+  | "analyzing"
+  | "analyzed"
+  | "planning"
+  | "ready"
+  | "blocked"
+  | "invalidated";
+
+export interface TransitionEdge {
+  id: string;
+  sourceTrackId: string;
+  targetTrackId: string;
+  status: TransitionEdgeStatus;
+  candidateCount: number;
+  selectedBy: "meta" | "deterministic_fallback" | "fixture" | null;
+  reason: string | null;
+  queueRevision: number;
+}
+
 export interface TransitionPlan {
   id: string;
   status: LifecycleStatus;
@@ -67,7 +87,7 @@ export interface CopilotState {
   crossfader: number;
   decks: [DeckState, DeckState];
   queue: QueueItem[];
+  transitions: TransitionEdge[];
   plan: TransitionPlan;
   events: PerformanceEvent[];
 }
-

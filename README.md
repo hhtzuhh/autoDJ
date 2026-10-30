@@ -84,6 +84,24 @@ npm run build
 npm run preview
 ```
 
+### Transition candidate pipeline
+
+The public repository contains the deterministic adjacent-pair scorer and
+versioned cache used before any model selection. It consumes preprocessed
+`track-analysis-v1.json` metadata; it does not require or publish the source
+audio. Candidate generation is explicitly marked `deterministic_heuristic_not_ai`.
+
+Run its synthetic acceptance suite with:
+
+```bash
+python -m unittest discover -s backend -p 'test_*.py' -v
+```
+
+The tests verify that a ten-track queue creates nine directional pair analyses,
+reordering builds only new adjacent edges, caches are reused, incompatible
+tempo is blocked, and queues longer than ten tracks remain supported. Meta
+selection for the current A–B–C window is the next integration milestone.
+
 ## Demo interaction
 
 1. The initial state shows B playing and a validated B→C fixture plan.
