@@ -173,6 +173,7 @@ class TransitionEdge:
             "targetTrackId": self.target_track_id,
             "status": self.status,
             "candidateCount": self.candidate_count,
+            "standbyReady": self.candidate_count > 0,
             "selectedBy": self.selected_by,
             "reason": self.reason,
             "queueRevision": self.queue_revision,

@@ -12,6 +12,7 @@ from meta_planner import (
     build_rolling_candidates,
     parse_decision,
     prompt_for,
+    select_future_fallback,
     select_with_meta,
     validate_decision,
 )
@@ -68,6 +69,17 @@ class MetaPlannerTest(unittest.TestCase):
                 for row in self.candidates
             )
         )
+
+    def test_fallback_revalidates_runway_against_latest_live_beat(self) -> None:
+        candidates = [
+            {"candidate_id": "early", "a_exit_beat_index": 120},
+            {"candidate_id": "future", "a_exit_beat_index": 180},
+        ]
+        self.assertEqual(
+            select_future_fallback(candidates, live_beat=130)["candidate_id"],
+            "future",
+        )
+        self.assertIsNone(select_future_fallback(candidates, live_beat=170))
         self.assertTrue(
             all(row["b_exit_beat_index"] == 220 for row in self.candidates)
         )

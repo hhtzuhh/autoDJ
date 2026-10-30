@@ -228,11 +228,12 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .transition-edge i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
 .transition-edge span + span, .transition-edge small { padding-left: 7px; border-left: 1px solid var(--line); }
 .transition-edge small { color: var(--muted); font: inherit; }
-.transition-edge--ready { color: var(--green); }
-.transition-edge--feasible { color: var(--cyan); }
+.transition-edge--ready, .transition-edge--armed, .transition-edge--executing, .transition-edge--completed { color: var(--green); }
+.transition-edge--feasible, .transition-edge--standby { color: var(--cyan); }
 .transition-edge--planning, .transition-edge--analyzing { color: var(--amber); }
-.transition-edge--blocked, .transition-edge--invalidated { color: var(--red); }
+.transition-edge--blocked, .transition-edge--invalidated, .transition-edge--needs_human, .transition-edge--expired { color: var(--red); }
 .transition-edge--pending { color: var(--muted); }
+.transition-edge small.is-warning { color: var(--red); font-weight: 700; }
 .queue-note { display: flex; gap: 9px; padding-top: 14px; margin-top: 12px; border-top: 1px solid var(--line); color: var(--muted); }
 .queue-note svg { flex: 0 0 auto; color: var(--green); margin-top: 1px; }
 .queue-note p { margin: 0; font-size: 10px; line-height: 1.5; }

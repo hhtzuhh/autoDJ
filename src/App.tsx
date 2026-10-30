@@ -17,7 +17,7 @@ const waveform = [
 
 const statusLabel: Record<LifecycleStatus, string> = {
   draft: "Draft",
-  ready: "Ready",
+  ready: "Plan ready",
   armed: "Armed",
   executing: "Executing",
   completed: "Completed",
@@ -377,7 +377,7 @@ function QueuePanel({
           </div>
           <div className="set-builder__status">
             <span className={`builder-state builder-state--${builder?.status ?? "idle"}`}>
-              {builder?.status ?? "idle"}
+              {builder?.status === "ready" ? "Set prepared" : builder?.status ?? "idle"}
             </span>
             <span>{builder?.catalogCount ?? 0} local tracks</span>
             {builder?.model && <span>{builder.model}</span>}
@@ -440,7 +440,14 @@ function QueuePanel({
                   {analysisStatus ?? liveTrack?.state}
                 </span>
               </div>
-              {transition && <TransitionReadiness edge={transition} />}
+              {transition && (
+                <TransitionReadiness
+                  edge={transition}
+                  currentBeat={state.decks.find(
+                    (deck) => deck.playing && deck.track?.id === transition.sourceTrackId,
+                  )?.beatIndex}
+                />
+              )}
             </div>
           );
         })}
@@ -457,18 +464,50 @@ function QueuePanel({
   );
 }
 
-function TransitionReadiness({ edge }: { edge: TransitionEdge }) {
+function TransitionReadiness({
+  edge,
+  currentBeat,
+}: {
+  edge: TransitionEdge;
+  currentBeat?: number | null;
+}) {
   const selectedBy = edge.selectedBy?.replace("deterministic_fallback", "fallback");
   const nextTiming = edge.sourceExitBeat != null && edge.targetEntryBeat != null
     ? `Beat ${edge.sourceExitBeat} → ${edge.targetEntryBeat}${edge.bars ? ` · ${edge.bars} bars` : ""}`
     : null;
+  const beatsToFinalArm = currentBeat != null && edge.sourceExitBeat != null
+    ? edge.sourceExitBeat - 16 - currentBeat
+    : null;
+  const displayStatus = edge.status === "analyzed" && edge.standbyReady
+    ? "Fallback available"
+    : edge.status === "standby"
+      ? "Fallback available"
+      : edge.status === "needs_human"
+        ? "Needs human"
+        : edge.status === "ready"
+          ? "Plan ready"
+          : edge.status === "feasible"
+            ? "Future draft"
+            : edge.status.replaceAll("_", " ");
   return (
     <div className={`transition-edge transition-edge--${edge.status}`}>
       <i />
-      <span>{edge.status === "feasible" ? "Next feasible" : edge.status}</span>
+      <span>{displayStatus}</span>
       {selectedBy && <span>{selectedBy}</span>}
       {nextTiming && <small>{nextTiming}</small>}
       <small>{edge.candidateCount} candidates</small>
+      {edge.standbyReady
+        && ["analyzed", "standby", "planning", "feasible"].includes(edge.status)
+        && (
+        <small>Fallback only · no live plan armed</small>
+      )}
+      {beatsToFinalArm != null && ["planning", "standby"].includes(edge.status) && (
+        <small className={beatsToFinalArm <= 32 ? "is-warning" : ""}>
+          {beatsToFinalArm > 0
+            ? `${beatsToFinalArm} beats until final safe arm`
+            : "Final safe arm point passed"}
+        </small>
+      )}
       {edge.reason && <small title={edge.reason}>{edge.reason.replaceAll("_", " ")}</small>}
     </div>
   );

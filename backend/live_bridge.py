@@ -38,6 +38,7 @@ from meta_planner import (  # noqa: E402
     OpenAICompatibleTransport,
     build_rolling_candidates,
     load_dotenv,
+    select_future_fallback,
     select_with_meta,
 )
 from set_builder import SetBuilderService  # noqa: E402
@@ -121,9 +122,15 @@ class LiveStateStore:
         _, self.transition_edges = self.transition_pipeline.set_queue(
             queue_snapshot.ordered_track_ids
         )
+        self._seed_standby_overrides()
         self.selection = self._load_selection()
-        self._restore_following_override()
         self.envelope = self._load_envelope()
+        if not self.envelope or self.envelope.get("status") not in {
+            "completed",
+            "invalidated",
+            "cancelled",
+        }:
+            self._restore_following_override()
         self.catalog = self._load_catalog()
         self.set_builder = SetBuilderService(workspace)
 
@@ -172,6 +179,28 @@ class LiveStateStore:
         source_index = track_ids.index(source_id)
         if source_index + 1 >= len(track_ids) or track_ids[source_index + 1] != target_id:
             raise RuntimeError("exact_set_list_edge_mismatch")
+
+    def _seed_standby_overrides(self) -> None:
+        """Expose a deterministic emergency candidate for every analyzed edge."""
+        for edge in self.transition_edges:
+            payload = self.transition_pipeline.cache.payload(
+                edge.source_track_id, edge.target_track_id
+            )
+            clean = payload.get("clean_break_pairs", [])
+            sync = payload.get("pairs", [])
+            candidate = clean[0] if clean else sync[0] if sync else None
+            if candidate is None:
+                continue
+            bars = 0 if clean else int(candidate["transition_bar_options"][0])
+            self.transition_overrides[(edge.source_track_id, edge.target_track_id)] = {
+                "status": "standby",
+                "standbyReady": True,
+                "selectedBy": "deterministic_fallback",
+                "reason": "Emergency fallback is locally validated; Meta has not selected the live plan.",
+                "sourceExitBeat": int(candidate["a_exit"]["beat_index"]),
+                "targetEntryBeat": int(candidate["b_entry"]["beat_index"]),
+                "bars": bars,
+            }
 
     def set_error(self, message: str) -> None:
         with self.lock:
@@ -309,6 +338,7 @@ class LiveStateStore:
         )
         self.catalog = self._load_catalog()
         self.transition_overrides.clear()
+        self._seed_standby_overrides()
         self.supervisor = None
         self.envelope = None
         self.auto_chain_started_for.clear()
@@ -522,13 +552,19 @@ class LiveStateStore:
             following_id = queue_ids[current_index + 2]
             track_ids = (source_id, target_id, following_id)
             following = self.transition_pipeline.cache.payload(target_id, following_id)
-            candidates = build_rolling_candidates(immediate, following)
+            all_candidates = build_rolling_candidates(immediate, following)
             candidates = [
                 row
-                for row in candidates
+                for row in all_candidates
                 if int(row["a_exit_beat_index"]) > int(source_deck.beat_index) + 16
             ]
             if not candidates:
+                self.transition_overrides[(source_id, target_id)] = {
+                    "status": "needs_human",
+                    "standbyReady": False,
+                    "selectedBy": None,
+                    "reason": "All locally validated exit windows have expired.",
+                }
                 return 409, {"error": "no_future_feasible_abc_candidates"}
 
             edge_key = (source_id, target_id)
@@ -558,14 +594,66 @@ class LiveStateStore:
                     target_deck_number,
                 )
             except Exception as error:
+                latest_match = find_track_deck(self.raw_performance, source_id)
+                latest_beat = (
+                    int(latest_match[1].beat_index)
+                    if latest_match and latest_match[1].beat_index is not None
+                    else int(source_deck.beat_index)
+                )
+                fallback = select_future_fallback(
+                    all_candidates, live_beat=latest_beat
+                )
+                if fallback is None:
+                    self.transition_overrides[edge_key] = {
+                        "status": "needs_human",
+                        "standbyReady": False,
+                        "selectedBy": None,
+                        "reason": f"Meta failed and every standby exit expired: {type(error).__name__}",
+                    }
+                    return 409, {
+                        "error": "meta_failed_and_fallback_expired",
+                        "detail": f"{type(error).__name__}: {error}",
+                    }
+                compiled = self._compile_meta_selection(
+                    track_ids,
+                    fallback,
+                    {
+                        "intent": "maintain_energy",
+                        "use_bass_swap": False,
+                        "confidence": float(fallback["combined_score"]),
+                        "reason": f"Meta unavailable ({type(error).__name__}); using the best still-future local standby.",
+                    },
+                    "local-fallback",
+                    source_deck_number,
+                    target_deck_number,
+                )
+                compiled["selection"] = "deterministic_fallback_after_meta_failure"
+                compiled["model"] = None
+                compiled["next_executable_plan"]["source"] = (
+                    "deterministic_fallback_after_meta_failure"
+                )
+                self.selection = compiled
+                self.envelope = None
+                self.supervisor = None
                 self.transition_overrides[edge_key] = {
-                    "status": "analyzed",
-                    "selectedBy": None,
-                    "reason": f"meta_planning_failed:{type(error).__name__}",
+                    "status": "ready",
+                    "standbyReady": True,
+                    "selectedBy": "deterministic_fallback",
+                    "reason": compiled["model_decision"]["reason"],
                 }
-                return 502, {
-                    "error": "meta_planning_failed",
-                    "detail": f"{type(error).__name__}: {error}",
+                self._restore_following_override()
+                self._write_dashboard_selection(compiled)
+                self._append_system_event(
+                    "Meta fallback activated",
+                    "Meta planning failed; the best still-future locally validated standby is ready to arm.",
+                )
+                return 200, {
+                    "accepted": True,
+                    "status": "ready",
+                    "selected_by": "deterministic_fallback",
+                    "model_called": True,
+                    "plan_id": compiled["next_executable_plan"]["plan_id"],
+                    "message": "Meta failed; local standby passed fresh live-beat validation.",
                 }
 
             self.selection = compiled
@@ -573,6 +661,7 @@ class LiveStateStore:
             self.supervisor = None
             self.transition_overrides[edge_key] = {
                 "status": "ready",
+                "standbyReady": True,
                 "selectedBy": "meta",
                 "reason": selection.decision.reason,
             }
@@ -602,8 +691,24 @@ class LiveStateStore:
             for candidate in candidates
             if int(candidate["a_exit"]["beat_index"]) > live_beat + 16
         ]
+        edge_key = (source_id, target_id)
         if not future:
+            self.transition_overrides[edge_key] = {
+                "status": "needs_human",
+                "standbyReady": False,
+                "selectedBy": None,
+                "reason": "All clean-break exit windows have expired.",
+            }
             return 409, {"error": "no_future_clean_break_candidate"}
+        self.transition_overrides[edge_key] = {
+            "status": "planning",
+            "standbyReady": True,
+            "selectedBy": "deterministic_fallback",
+            "reason": "Meta is selecting; a local standby remains available.",
+            "sourceExitBeat": int(future[0]["a_exit"]["beat_index"]),
+            "targetEntryBeat": int(future[0]["b_entry"]["beat_index"]),
+            "bars": 0,
+        }
         load_dotenv(BACKEND_ROOT.parent / ".env")
         load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
         try:
@@ -626,14 +731,60 @@ class LiveStateStore:
                 model=config.model,
             )
         except Exception as error:
-            return 502, {"error": "clean_break_planning_failed", "detail": str(error)}
+            latest_match = find_track_deck(self.raw_performance, source_id)
+            latest_beat = (
+                int(latest_match[1].beat_index)
+                if latest_match and latest_match[1].beat_index is not None
+                else live_beat
+            )
+            pair = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if int(candidate["a_exit"]["beat_index"])
+                    > latest_beat + 16
+                ),
+                None,
+            )
+            if pair is None:
+                self.transition_overrides[edge_key] = {
+                    "status": "needs_human",
+                    "standbyReady": False,
+                    "selectedBy": None,
+                    "reason": f"Meta failed and every clean-break standby expired: {type(error).__name__}",
+                }
+                return 409, {
+                    "error": "meta_failed_and_clean_break_fallback_expired",
+                    "detail": str(error),
+                }
+            confidence = float(pair["heuristic_score"])
+            reason = (
+                f"Meta unavailable ({type(error).__name__}); using the best "
+                "still-future local clean-break standby."
+            )
+            plan = compile_clean_break_plan(
+                source_id=source_id,
+                target_id=target_id,
+                pair=pair,
+                catalog=self.analysis_catalog,
+                queue_revision=int(self.queue["revision"]),
+                source_deck=source_deck,
+                target_deck=target_deck,
+                model="local-fallback",
+            )
+            plan["source"] = "deterministic_fallback_after_meta_failure"
+            config = None
         compiled = {
             "schema_version": 1,
-            "selection": "meta_clean_break_single_call",
+            "selection": (
+                "meta_clean_break_single_call"
+                if config is not None
+                else "deterministic_fallback_after_meta_failure"
+            ),
             "source_window_id": f"clean-q{self.queue['revision']}-{source_id[:8]}-{target_id[:8]}",
             "queue_revision": int(self.queue["revision"]),
             "intent": "clean_break",
-            "model": config.model,
+            "model": config.model if config is not None else None,
             "model_decision": {
                 "confidence": confidence,
                 "reason": reason,
@@ -645,20 +796,26 @@ class LiveStateStore:
         self.selection = compiled
         self.envelope = None
         self.supervisor = None
-        self.transition_overrides[(source_id, target_id)] = {
+        selected_by = "meta" if config is not None else "deterministic_fallback"
+        self.transition_overrides[edge_key] = {
             "status": "ready",
-            "selectedBy": "meta",
+            "standbyReady": True,
+            "selectedBy": selected_by,
             "reason": reason,
         }
         self._write_dashboard_selection(compiled)
         return 200, {
             "accepted": True,
             "status": "ready",
-            "selected_by": "meta",
-            "model": config.model,
+            "selected_by": selected_by,
+            "model": config.model if config is not None else None,
             "candidate_count": min(10, len(future)),
             "plan_id": plan["plan_id"],
-            "message": "Meta selected a clean-break candidate; native tempos remain unchanged.",
+            "message": (
+                "Meta selected a clean-break candidate; native tempos remain unchanged."
+                if config is not None
+                else "Meta failed; local clean-break standby passed fresh live-beat validation."
+            ),
         }
 
     def _promote_following_draft(
@@ -825,8 +982,13 @@ class LiveStateStore:
         target_id = str(draft["target_track_id"])
         self.transition_overrides[(source_id, target_id)] = {
             "status": "feasible",
-            "selectedBy": "meta",
-            "reason": "Meta preserved this next transition; it is not loaded or armed.",
+            "standbyReady": True,
+            "selectedBy": (
+                "deterministic_fallback"
+                if "fallback" in str(self.selection.get("selection", ""))
+                else "meta"
+            ),
+            "reason": "A future transition is preserved, but it is not loaded or armed.",
             "sourceExitBeat": int(draft["source_exit_beat_index"]),
             "targetEntryBeat": int(draft["target_entry_beat_index"]),
             "bars": int(draft["transition_bars"]),
@@ -1248,12 +1410,17 @@ class LiveStateStore:
         selection_name = str(self.selection.get("selection", ""))
         plan_status = "ready"
         invalidation_reason = None
-        if self.envelope and self.envelope.get("plan_id") == plan_payload["plan_id"]:
+        if self.envelope and str(self.envelope.get("plan_id", "")).startswith(
+            str(plan_payload["plan_id"])
+        ):
             plan_status = str(self.envelope.get("status", "ready"))
             invalidation_reason = self.envelope.get("invalidation_reason")
         source = str(plan_payload.get("source", ""))
         selected_by = (
-            "meta"
+            "deterministic_fallback"
+            if "deterministic_fallback" in source
+            or "deterministic_fallback" in selection_name
+            else "meta"
             if "meta" in source or "meta" in selection_name
             else "deterministic_fallback"
         )
@@ -1321,12 +1488,21 @@ class LiveStateStore:
             )
             if override:
                 payload.update(override)
+            edge_source_index = queue_ids.index(edge.source_track_id)
+            if edge_source_index < current_index:
+                payload["status"] = "completed"
             if (
                 edge.source_track_id == plan["sourceTrackId"]
                 and edge.target_track_id == plan["targetTrackId"]
             ):
                 if plan_status in {"draft", "ready", "armed", "executing"}:
-                    payload["status"] = "ready"
+                    payload["status"] = (
+                        "ready" if plan_status in {"draft", "ready"} else plan_status
+                    )
+                    payload["selectedBy"] = selected_by
+                    payload["reason"] = plan["reason"]
+                elif plan_status == "completed":
+                    payload["status"] = "completed"
                     payload["selectedBy"] = selected_by
                 elif plan_status in {"invalidated", "cancelled"}:
                     payload["status"] = "invalidated"

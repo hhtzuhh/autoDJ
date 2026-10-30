@@ -349,6 +349,7 @@ class SetBuilderService:
             "targetTrackId": target_id,
             "status": status,
             "candidateCount": 0,
+            "standbyReady": False,
             "selectedBy": None,
             "reason": None,
             "queueRevision": int(current_state.get("queueRevision", 0)),
@@ -365,6 +366,10 @@ class SetBuilderService:
         for source_id, target_id in adjacent_pairs(target.get("orderedTrackIds", [])):
             edge = dict(old.get((source_id, target_id), self._edge(source_id, target_id)))
             edge["queueRevision"] = revision
+            edge["standbyReady"] = (
+                edge.get("status") in {"analyzed", "ready"}
+                and int(edge.get("candidateCount", 0)) > 0
+            )
             edges.append(edge)
         target["transitions"] = edges
 
@@ -593,6 +598,7 @@ class SetBuilderService:
                 if edge is not None:
                     edge["candidateCount"] = int(count)
                     edge["status"] = "analyzed" if count else "blocked"
+                    edge["standbyReady"] = bool(count)
                     edge["reason"] = strategy_reason if count else "no_transition_candidates"
                 self._schedule_current()
                 self._recompute_status()

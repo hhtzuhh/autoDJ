@@ -4,6 +4,9 @@ export type LifecycleStatus =
   | "armed"
   | "executing"
   | "completed"
+  | "armed"
+  | "executing"
+  | "completed"
   | "invalidated"
   | "cancelled"
   | "replanning";
@@ -47,10 +50,13 @@ export type TransitionEdgeStatus =
   | "pending"
   | "analyzing"
   | "analyzed"
+  | "standby"
   | "planning"
   | "ready"
   | "feasible"
   | "blocked"
+  | "needs_human"
+  | "expired"
   | "invalidated";
 
 export interface TransitionEdge {
@@ -59,6 +65,7 @@ export interface TransitionEdge {
   targetTrackId: string;
   status: TransitionEdgeStatus;
   candidateCount: number;
+  standbyReady?: boolean;
   selectedBy: "meta" | "deterministic_fallback" | "fixture" | null;
   reason: string | null;
   queueRevision: number;

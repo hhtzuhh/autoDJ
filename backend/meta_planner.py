@@ -149,6 +149,23 @@ def build_rolling_candidates(
     )[:limit]
 
 
+def select_future_fallback(
+    candidates: list[dict[str, Any]],
+    *,
+    live_beat: int,
+    runway_beats: int = 16,
+) -> dict[str, Any] | None:
+    """Return the best still-armable locally validated rolling candidate."""
+    return next(
+        (
+            candidate
+            for candidate in candidates
+            if int(candidate["a_exit_beat_index"]) > live_beat + runway_beats
+        ),
+        None,
+    )
+
+
 def prompt_for(
     candidates: list[dict[str, Any]],
     *,

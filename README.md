@@ -46,6 +46,13 @@ separately validated local prototype.
   actions. Planning makes one model request, validates the returned candidate
   locally, and never writes to Mixxx. Arming remains a distinct human action
   behind the existing lifecycle preflight and executor.
+- Queue transition labels now distinguish analyzed candidates from execution
+  readiness. `Standby ready` means a deterministic emergency candidate exists
+  but no Meta plan is armed; `Plan ready`, `Armed`, and `Executing` are separate
+  states. If a Meta request fails, local code revalidates the standby against
+  the latest observed beat and uses it only while sufficient arm runway
+  remains. Otherwise the edge becomes `Needs human` instead of silently
+  waiting or seeking backward.
 - Not included here yet: a standalone public Mixxx observer/executor and
   redistributable audio fixtures.
 - The UI labels simulation data explicitly. It does not present fixture events
@@ -219,6 +226,9 @@ contract and connects Arm and Takeover to the local lifecycle supervisor.
 - The model never sends beat-by-beat Mixxx commands.
 - Local code owns identity, timing, queue revision, and lifecycle validation.
 - Invalid, late, or unavailable plans do not interrupt the current song.
+- Meta failure falls back only to a previously analyzed candidate that still
+  passes a fresh live-beat runway check; an expired fallback becomes an
+  explicit human-action state.
 - Human transport, seek, loop, and crossfader actions take priority.
 - Pre-transition Deck volume, Low EQ, and filter shaping preserve the timed
   cue; the same channel controls at or after transition start become takeover.
