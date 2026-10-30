@@ -14,8 +14,13 @@ separately validated local prototype.
 - Implemented here: responsive React/TypeScript control-room UI, typed state
   contract, queue/Deck/plan/event views, and an interactive simulation of cue
   expiry, uninterrupted replanning, arming, and human takeover.
-- Not connected here yet: live Mixxx observer, Meta Model API call, local audio
-  executor, and redistributable audio fixtures.
+- Development bridge implemented: the verified private-workspace Mixxx
+  observer can now feed real Deck identity, play state, beat, position, sync,
+  queue revision, plan provenance, and events into the dashboard. This bridge
+  still depends on the sibling experimental workspace and is not yet the
+  standalone public observer implementation.
+- Not connected here yet: live Meta Model API request, write controls into the
+  local audio executor, and redistributable audio fixtures.
 - The UI labels simulation data explicitly. It does not present fixture events
   as live model or audio-engine behavior.
 
@@ -29,6 +34,31 @@ npm run dev
 ```
 
 Open the Vite URL, normally `http://127.0.0.1:5173`.
+
+### Development live bridge
+
+From the private hackathon workspace, with the Mixxx MIDI mapping installed:
+
+```bash
+experiments/mixxx-control/.venv/bin/python \
+  submission/backend/live_bridge.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5173/?source=live
+```
+
+The live mode is currently read-only. It proves synchronization without
+exposing playback writes before lifecycle and takeover checks are wired to the
+product boundary.
+
+Live acceptance on 2026-10-30 observed Mixxx Deck 1 playing Boomerang. The
+bridge reported beat 209 at 95.410 seconds; the React view subsequently showed
+beat 216 at approximately 98 seconds, performance revision 10, queue revision
+3, and the same human seek/play/crossfader events. This verifies the read path;
+it does not yet verify product write controls.
 
 For a production build:
 
@@ -64,4 +94,3 @@ The control architecture, music-analysis pipeline, constrained planning,
 Mixxx observer/executor integration, takeover behavior, and this product UI
 were developed during the hackathon. The public product integration is still
 in progress; claims will be updated only after runnable verification.
-

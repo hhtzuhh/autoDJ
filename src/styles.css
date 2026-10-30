@@ -70,11 +70,17 @@ svg { width: 1.1em; height: 1.1em; fill: currentColor; }
 .topbar__status { gap: 18px; font: 500 11px "DM Mono", monospace; color: var(--muted); }
 .source-badge, .connection { display: inline-flex; align-items: center; gap: 7px; }
 .source-badge { color: var(--amber); background: rgba(255,197,107,.08); border: 1px solid rgba(255,197,107,.22); border-radius: 999px; padding: 7px 11px; }
+.source-badge--live { color: var(--cyan); background: rgba(102,225,255,.08); border-color: rgba(102,225,255,.24); }
 .source-badge i, .connection i, .transport i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
 .connection { color: var(--green); }
+.connection.is-off { color: var(--red); }
 .revision { border-left: 1px solid var(--line); padding-left: 18px; }
 
 main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
+
+.bridge-error { margin-top: 18px; padding: 12px 15px; border-radius: 11px; border: 1px solid rgba(255,111,125,.28); background: rgba(255,111,125,.07); display: flex; gap: 10px; align-items: baseline; }
+.bridge-error strong { color: var(--red); font-size: 11px; }
+.bridge-error span { color: var(--muted); font: 400 10px "DM Mono", monospace; }
 
 .hero-strip { padding: 42px 4px 30px; display: flex; justify-content: space-between; align-items: flex-end; }
 .eyebrow { display: block; font: 500 10px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; letter-spacing: .13em; margin-bottom: 7px; }
@@ -211,6 +217,7 @@ h1 em { font-style: normal; color: var(--muted); font-weight: 500; }
 .button--danger { color: var(--red); border-color: rgba(255,111,125,.25); }
 .button--danger:hover { background: rgba(255,111,125,.08); }
 .button--ghost { color: var(--muted); }
+.button--live { color: var(--cyan); border-color: rgba(102,225,255,.22); background: rgba(102,225,255,.06); opacity: 1 !important; }
 
 @media (max-width: 940px) {
   .topbar { padding: 0 20px; }
@@ -246,4 +253,3 @@ h1 em { font-style: normal; color: var(--muted); font-weight: 500; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation-duration: .001ms !important; }
 }
-

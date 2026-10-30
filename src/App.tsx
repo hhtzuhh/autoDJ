@@ -120,11 +120,16 @@ function PlanPanel({ state }: { state: CopilotState }) {
   const source = state.queue.find((track) => track.id === state.plan.sourceTrackId)!;
   const target = state.queue.find((track) => track.id === state.plan.targetTrackId)!;
   const isFixture = state.plan.selectedBy === "fixture";
+  const isTerminal = ["completed", "invalidated", "cancelled"].includes(
+    state.plan.status,
+  );
   return (
     <section className="panel plan-panel">
       <div className="panel__header">
         <div>
-          <span className="eyebrow">Next transition</span>
+          <span className="eyebrow">
+            {isTerminal ? "Latest transition" : "Next transition"}
+          </span>
           <h2>AI plan</h2>
         </div>
         <span className={`status-chip status-chip--${state.plan.status}`}>
@@ -245,17 +250,30 @@ function EventLog({ events }: { events: PerformanceEvent[] }) {
 function App() {
   const [state, setState] = useState<CopilotState>(initialState);
   const [isReplanning, setIsReplanning] = useState(false);
+  const [bridgeError, setBridgeError] = useState<string | null>(null);
+  const liveRequested = useMemo(
+    () => new URLSearchParams(window.location.search).get("source") === "live",
+    [],
+  );
 
   const currentDeck = useMemo(
     () => state.decks.find((deck) => deck.playing) ?? state.decks[1],
     [state.decks],
   );
-  const beatsUntilCue = currentDeck.beatIndex == null
+  const activeSourceDeck = useMemo(
+    () => state.decks.find(
+      (deck) => deck.playing && deck.track?.id === state.plan.sourceTrackId,
+    ),
+    [state.decks, state.plan.sourceTrackId],
+  );
+  const planCanStillExecute = ["draft", "ready", "armed", "executing", "replanning"]
+    .includes(state.plan.status);
+  const beatsUntilCue = !planCanStillExecute || activeSourceDeck?.beatIndex == null
     ? null
-    : state.plan.sourceExitBeat - currentDeck.beatIndex;
+    : state.plan.sourceExitBeat - activeSourceDeck.beatIndex;
 
   useEffect(() => {
-    if (!currentDeck.playing) return;
+    if (state.dataSource !== "simulation" || !currentDeck.playing) return;
     const timer = window.setInterval(() => {
       setState((current) => ({
         ...current,
@@ -273,10 +291,40 @@ function App() {
       }));
     }, 460);
     return () => window.clearInterval(timer);
-  }, [currentDeck.playing]);
+  }, [currentDeck.playing, state.dataSource]);
+
+  useEffect(() => {
+    if (!liveRequested) return;
+    let cancelled = false;
+    const readLiveState = async () => {
+      try {
+        const response = await fetch("http://127.0.0.1:8765/api/state", {
+          cache: "no-store",
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error ?? `Bridge returned ${response.status}`);
+        }
+        if (!cancelled) {
+          setState(payload as CopilotState);
+          setBridgeError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setBridgeError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    };
+    void readLiveState();
+    const timer = window.setInterval(() => void readLiveState(), 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [liveRequested]);
 
   const extendPerformance = () => {
-    if (isReplanning) return;
+    if (state.dataSource !== "simulation" || isReplanning) return;
     setIsReplanning(true);
     setState((current) => ({
       ...current,
@@ -332,7 +380,7 @@ function App() {
   };
 
   const armPlan = () => {
-    if (state.plan.status !== "ready") return;
+    if (state.dataSource !== "simulation" || state.plan.status !== "ready") return;
     setState((current) => ({
       ...current,
       plan: { ...current.plan, status: "armed" },
@@ -364,6 +412,7 @@ function App() {
   };
 
   const takeOver = () => {
+    if (state.dataSource !== "simulation") return;
     setIsReplanning(false);
     setState((current) => ({
       ...current,
@@ -385,6 +434,7 @@ function App() {
   };
 
   const reset = () => {
+    if (state.dataSource !== "simulation") return;
     setIsReplanning(false);
     setState({
       ...initialState,
@@ -403,13 +453,23 @@ function App() {
           </div>
         </div>
         <div className="topbar__status">
-          <span className="source-badge"><i /> Simulation</span>
-          <span className="connection"><i /> State connected</span>
+          <span className={`source-badge source-badge--${state.dataSource}`}>
+            <i /> {state.dataSource === "live" ? "Live Mixxx" : "Simulation"}
+          </span>
+          <span className={`connection ${state.connected ? "" : "is-off"}`}>
+            <i /> {state.connected ? "State connected" : "Disconnected"}
+          </span>
           <span className="revision">P{state.performanceRevision} · Q{state.queueRevision}</span>
         </div>
       </header>
 
       <main>
+        {liveRequested && bridgeError && (
+          <div className="bridge-error" role="alert">
+            <strong>Waiting for Mixxx bridge</strong>
+            <span>{bridgeError}</span>
+          </div>
+        )}
         <section className="hero-strip">
           <div>
             <span className="eyebrow">Live control room</span>
@@ -436,29 +496,47 @@ function App() {
 
       <footer className="control-dock">
         <div className="control-dock__context">
-          <span>Demo controls</span>
-          <p>Every action is labeled simulation until the live adapter is connected.</p>
+          <span>{state.dataSource === "live" ? "Live observer" : "Demo controls"}</span>
+          <p>
+            {state.dataSource === "live"
+              ? "Read-only Mixxx sync is active. Write controls remain locked."
+              : "Every action is labeled simulation until the live adapter is connected."}
+          </p>
         </div>
-        <div className="control-dock__actions">
-          <button className="button button--ghost" onClick={reset}>Reset</button>
-          <button
-            className="button button--secondary"
-            onClick={extendPerformance}
-            disabled={isReplanning || state.plan.status === "cancelled"}
-          >
-            Extend B past cue
-          </button>
-          <button
-            className="button button--primary"
-            onClick={armPlan}
-            disabled={state.plan.status !== "ready" || isReplanning}
-          >
-            <Icon name="play" /> Approve & arm
-          </button>
-          <button className="button button--danger" onClick={takeOver}>
-            Take over
-          </button>
-        </div>
+        {state.dataSource === "simulation" ? (
+          <div className="control-dock__actions">
+            <button className="button button--ghost" onClick={reset}>Reset</button>
+            <button
+              className="button button--secondary"
+              onClick={extendPerformance}
+              disabled={isReplanning || state.plan.status === "cancelled"}
+            >
+              Extend B past cue
+            </button>
+            <button
+              className="button button--primary"
+              onClick={armPlan}
+              disabled={state.plan.status !== "ready" || isReplanning}
+            >
+              <Icon name="play" /> Approve & arm
+            </button>
+            <button className="button button--danger" onClick={takeOver}>
+              Take over
+            </button>
+          </div>
+        ) : (
+          <div className="control-dock__actions">
+            <button
+              className="button button--ghost"
+              onClick={() => { window.location.href = "/"; }}
+            >
+              Open simulation
+            </button>
+            <button className="button button--live" disabled>
+              <Icon name="radio" /> Observer only
+            </button>
+          </div>
+        )}
       </footer>
     </div>
   );
