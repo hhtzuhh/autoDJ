@@ -45,27 +45,118 @@ function Icon({ name }: { name: "spark" | "play" | "shield" | "radio" }) {
   );
 }
 
-function Waveform({ progress, accent }: { progress: number; accent: string }) {
+interface WaveformWindow {
+  cueBeat: number;
+  mixStartBeat: number;
+  mixEndBeat: number;
+  cuePosition: number;
+  mixStartPosition: number;
+  mixEndPosition: number;
+}
+
+function Waveform({
+  progress,
+  accent,
+  window,
+  entry,
+}: {
+  progress: number;
+  accent: string;
+  window?: WaveformWindow;
+  entry?: { beat: number; position: number };
+}) {
   return (
-    <div className={`waveform waveform--${accent}`} aria-label="Track waveform">
-      <div className="waveform__bars">
-        {waveform.map((height, index) => (
-          <span
-            key={index}
-            className={index / waveform.length <= progress ? "is-played" : ""}
-            style={{ height: `${height}%` }}
+    <div className="waveform-block">
+      <div className={`waveform waveform--${accent}`} aria-label="Track waveform">
+        <div className="waveform__bars">
+          {waveform.map((height, index) => (
+            <span
+              key={index}
+              className={index / waveform.length <= progress ? "is-played" : ""}
+              style={{ height: `${height}%` }}
+            />
+          ))}
+        </div>
+        {window && (
+          <>
+            <div
+              className="waveform__mix-window"
+              style={{
+                left: `${window.mixStartPosition * 100}%`,
+                width: `${Math.max(0, window.mixEndPosition - window.mixStartPosition) * 100}%`,
+              }}
+              title={`Mix window: beat ${window.mixStartBeat}–${window.mixEndBeat}`}
+            />
+            <div
+              className="waveform__cue-marker"
+              style={{ left: `${window.cuePosition * 100}%` }}
+              title={`Cue / prepare: beat ${window.cueBeat}`}
+            />
+          </>
+        )}
+        {entry && (
+          <div
+            className="waveform__entry-marker"
+            style={{ left: `${entry.position * 100}%` }}
+            title={`Target entry: beat ${entry.beat}`}
           />
-        ))}
+        )}
+        <div className="waveform__needle" style={{ left: `${progress * 100}%` }} />
       </div>
-      <div className="waveform__needle" style={{ left: `${progress * 100}%` }} />
+      {(window || entry) && (
+        <div className={`waveform-labels ${window ? "has-window" : ""}`}>
+          {window && (
+            <span
+              className="is-cue"
+              style={{ left: `${window.cuePosition * 100}%` }}
+            >
+              Cue {window.cueBeat}
+            </span>
+          )}
+          {window && (
+            <span
+              className="is-mix"
+              style={{
+                left: `${((window.mixStartPosition + window.mixEndPosition) / 2) * 100}%`,
+              }}
+            >
+              Mix {window.mixStartBeat}–{window.mixEndBeat}
+            </span>
+          )}
+          {entry && (
+            <span
+              className="is-entry"
+              style={{ left: `${entry.position * 100}%` }}
+            >
+              In {entry.beat}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function DeckCard({ deck }: { deck: DeckState }) {
+function DeckCard({ deck, state }: { deck: DeckState; state: CopilotState }) {
   const progress = deck.track
     ? Math.min(1, deck.positionSeconds / deck.track.durationSeconds)
     : 0;
+  const planWindow = deck.track?.id === state.plan.sourceTrackId
+    ? {
+        cueBeat: state.plan.sourceCueBeat,
+        mixStartBeat: state.plan.sourceExitBeat,
+        mixEndBeat: state.plan.sourceExitBeat + state.plan.bars * 4,
+        cuePosition: state.plan.sourceCuePosition,
+        mixStartPosition: state.plan.sourceMixStartPosition,
+        mixEndPosition: state.plan.sourceMixEndPosition,
+      }
+    : undefined;
+  const entryMarker = deck.track?.id === state.plan.targetTrackId
+    ? {
+        beat: state.plan.targetEntryBeat,
+        position: state.plan.targetEntryPosition,
+      }
+    : undefined;
   return (
     <article className={`deck-card ${deck.playing ? "is-playing" : ""}`}>
       <div className="deck-card__topline">
@@ -81,7 +172,12 @@ function DeckCard({ deck }: { deck: DeckState }) {
               <h3>{deck.track.title}</h3>
             </div>
           </div>
-          <Waveform progress={progress} accent={deck.track.accent} />
+          <Waveform
+            progress={progress}
+            accent={deck.track.accent}
+            window={planWindow}
+            entry={entryMarker}
+          />
           <div className="deck-card__readout">
             <div>
               <strong>{formatTime(deck.positionSeconds)}</strong>
@@ -146,11 +242,18 @@ function PlanPanel({ state }: { state: CopilotState }) {
 
       <div className="cue-grid">
         <div>
-          <span>Exit source</span>
-          <strong>Beat {state.plan.sourceExitBeat}</strong>
+          <span>Cue / prepare</span>
+          <strong>Beat {state.plan.sourceCueBeat}</strong>
         </div>
         <div>
-          <span>Enter target</span>
+          <span>Mix window</span>
+          <strong>
+            Beat {state.plan.sourceExitBeat}–
+            {state.plan.sourceExitBeat + state.plan.bars * 4}
+          </strong>
+        </div>
+        <div>
+          <span>Target cue</span>
           <strong>Beat {state.plan.targetEntryBeat}</strong>
         </div>
         <div>
@@ -232,11 +335,15 @@ function QueuePanel({ state }: { state: CopilotState }) {
 
 function TransitionReadiness({ edge }: { edge: TransitionEdge }) {
   const selectedBy = edge.selectedBy?.replace("deterministic_fallback", "fallback");
+  const nextTiming = edge.sourceExitBeat != null && edge.targetEntryBeat != null
+    ? `Beat ${edge.sourceExitBeat} → ${edge.targetEntryBeat}${edge.bars ? ` · ${edge.bars} bars` : ""}`
+    : null;
   return (
     <div className={`transition-edge transition-edge--${edge.status}`}>
       <i />
-      <span>{edge.status}</span>
+      <span>{edge.status === "feasible" ? "Next feasible" : edge.status}</span>
       {selectedBy && <span>{selectedBy}</span>}
+      {nextTiming && <small>{nextTiming}</small>}
       <small>{edge.candidateCount} candidates</small>
       {edge.reason && <small title={edge.reason}>details</small>}
     </div>
@@ -294,7 +401,7 @@ function App() {
     .includes(state.plan.status);
   const beatsUntilCue = !planCanStillExecute || activeSourceDeck?.beatIndex == null
     ? null
-    : state.plan.sourceExitBeat - activeSourceDeck.beatIndex;
+    : state.plan.sourceCueBeat - activeSourceDeck.beatIndex;
 
   useEffect(() => {
     if (state.dataSource !== "simulation" || !currentDeck.playing) return;
@@ -379,8 +486,13 @@ function App() {
           ...current.plan,
           id: "fixture-q3-live-replan",
           status: "ready",
+          sourceCueBeat: 340,
           sourceExitBeat: 348,
+          sourceCuePosition: 0.806,
+          sourceMixStartPosition: 0.825,
+          sourceMixEndPosition: 0.844,
           targetEntryBeat: 228,
+          targetEntryPosition: 0.69,
           bars: 2,
           confidence: 0.71,
           reason:
@@ -545,7 +657,9 @@ function App() {
         </section>
 
         <div className="deck-grid">
-          {state.decks.map((deck) => <DeckCard deck={deck} key={deck.deck} />)}
+          {state.decks.map((deck) => (
+            <DeckCard deck={deck} state={state} key={deck.deck} />
+          ))}
         </div>
 
         <div className="workspace-grid">

@@ -62,6 +62,18 @@ def clock_time() -> str:
     return datetime.now().astimezone().strftime("%I:%M:%S %p").lstrip("0")
 
 
+def find_track_deck(performance: Any, track_id: str) -> tuple[int, Any] | None:
+    """Resolve the observer dictionary key; DeckState has no deck field."""
+    return next(
+        (
+            (int(deck_number), deck)
+            for deck_number, deck in performance.decks.items()
+            if deck.track_id == track_id
+        ),
+        None,
+    )
+
+
 class LiveStateStore:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
@@ -96,11 +108,14 @@ class LiveStateStore:
             queue_snapshot.ordered_track_ids
         )
         self.selection = self._load_selection()
+        self._restore_following_override()
         self.envelope = self._load_envelope()
         self.catalog = self._load_catalog()
 
     def _load_selection(self) -> dict[str, Any]:
         candidates = (
+            self.workspace
+            / "artifacts/live-performance/dashboard-meta-selection-v1.json",
             self.workspace
             / "artifacts/live-performance/live-replan-selection-v1.json",
             self.workspace
@@ -195,23 +210,20 @@ class LiveStateStore:
             if self.current_track_id not in queue_ids:
                 return 409, {"error": "current_track_is_not_in_queue"}
             current_index = queue_ids.index(self.current_track_id)
+            if current_index + 1 >= len(queue_ids):
+                return 409, {"error": "queue_has_no_next_track"}
             if current_index + 2 >= len(queue_ids):
-                return 409, {
-                    "error": "rolling_window_requires_current_next_and_following_tracks"
-                }
+                return self._promote_following_draft(
+                    queue_ids[current_index],
+                    queue_ids[current_index + 1],
+                )
             track_ids = tuple(queue_ids[current_index : current_index + 3])
             source_id, target_id, following_id = track_ids
-            source_deck = next(
-                (
-                    deck
-                    for deck in self.raw_performance.decks.values()
-                    if deck.track_id == source_id
-                ),
-                None,
-            )
-            if source_deck is None or source_deck.beat_index is None:
+            source_match = find_track_deck(self.raw_performance, source_id)
+            if source_match is None or source_match[1].beat_index is None:
                 return 409, {"error": "current_source_deck_is_not_observable"}
-            target_deck_number = 1 if int(source_deck.deck) == 2 else 2
+            source_deck_number, source_deck = source_match
+            target_deck_number = 1 if source_deck_number == 2 else 2
             immediate = self.transition_pipeline.cache.payload(source_id, target_id)
             following = self.transition_pipeline.cache.payload(target_id, following_id)
             candidates = build_rolling_candidates(immediate, following)
@@ -246,7 +258,7 @@ class LiveStateStore:
                     selection.candidate,
                     selection.decision.to_dict(),
                     config.model,
-                    int(source_deck.deck),
+                    source_deck_number,
                     target_deck_number,
                 )
             except Exception as error:
@@ -268,15 +280,8 @@ class LiveStateStore:
                 "selectedBy": "meta",
                 "reason": selection.decision.reason,
             }
-            runtime = self.workspace / "artifacts/live-performance"
-            output = runtime / "dashboard-meta-selection-v1.json"
-            temporary = output.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(compiled, indent=2, ensure_ascii=False, sort_keys=True)
-                + "\n",
-                encoding="utf-8",
-            )
-            temporary.replace(output)
+            self._restore_following_override()
+            self._write_dashboard_selection(compiled)
             return 200, {
                 "accepted": True,
                 "status": "ready",
@@ -286,6 +291,177 @@ class LiveStateStore:
                 "plan_id": compiled["next_executable_plan"]["plan_id"],
                 "message": "Meta selected one locally feasible candidate; local compilation succeeded.",
             }
+
+    def _promote_following_draft(
+        self,
+        source_id: str,
+        target_id: str,
+    ) -> tuple[int, dict[str, Any]]:
+        draft = self.selection.get("following_feasible_draft")
+        if (
+            not isinstance(draft, dict)
+            or draft.get("status") != "feasible_not_armed"
+            or draft.get("source_track_id") != source_id
+            or draft.get("target_track_id") != target_id
+        ):
+            return 409, {
+                "error": "rolling_window_requires_current_next_and_following_tracks"
+            }
+        source_match = find_track_deck(self.raw_performance, source_id)
+        target_match = find_track_deck(self.raw_performance, target_id)
+        if source_match is None or source_match[1].beat_index is None:
+            return 409, {"error": "current_source_deck_is_not_observable"}
+        if target_match is None:
+            return 409, {
+                "error": "following_target_is_not_loaded",
+                "message": "Load the preserved next track into the free Deck first.",
+            }
+        source_deck_number, source_deck = source_match
+        target_deck_number, _ = target_match
+        if source_deck_number == target_deck_number:
+            return 409, {"error": "source_and_target_must_use_distinct_decks"}
+        transition_start = int(draft["source_exit_beat_index"])
+        if transition_start <= int(source_deck.beat_index) + 16:
+            return self._recover_expired_following(source_id, target_id)
+
+        model = str(self.selection.get("model") or MetaConfig.from_environment().model)
+        plan = self._build_executable_plan(
+            source_id=source_id,
+            target_id=target_id,
+            source_exit_beat=transition_start,
+            target_entry_beat=int(draft["target_entry_beat_index"]),
+            transition_bars=int(draft["transition_bars"]),
+            model=model,
+            source_deck=source_deck_number,
+            target_deck=target_deck_number,
+            plan_suffix=f"following-{source_id[:8]}-{target_id[:8]}",
+            use_bass_swap=False,
+        )
+        prior_decision = self.selection.get("model_decision", {})
+        compiled = {
+            "schema_version": 1,
+            "selection": "meta_following_draft_promotion",
+            "source_window_id": f"dashboard-q{self.queue['revision']}-following",
+            "queue_revision": int(self.queue["revision"]),
+            "intent": self.selection.get("intent", "maintain_energy"),
+            "model": model,
+            "model_decision": {
+                "selected_candidate_id": prior_decision.get(
+                    "selected_candidate_id", "preserved-following-draft"
+                ),
+                "intent": prior_decision.get("intent", "maintain_energy"),
+                "use_bass_swap": False,
+                "confidence": prior_decision.get("confidence", 0.75),
+                "reason": "Promoted the B→C leg preserved by the earlier Meta A–B–C decision.",
+            },
+            "selected_candidate": dict(draft),
+            "next_executable_plan": plan,
+        }
+        self.selection = compiled
+        self.envelope = None
+        self.supervisor = None
+        self.transition_overrides[(source_id, target_id)] = {
+            "status": "ready",
+            "selectedBy": "meta",
+            "reason": "Promoted from the previously selected Meta following draft.",
+        }
+        self._write_dashboard_selection(compiled)
+        return 200, {
+            "accepted": True,
+            "status": "ready",
+            "selected_by": "meta",
+            "model": model,
+            "model_called": False,
+            "plan_id": plan["plan_id"],
+            "message": "Preserved Meta following draft promoted locally; no new model call.",
+        }
+
+    def _recover_expired_following(
+        self,
+        source_id: str,
+        target_id: str,
+    ) -> tuple[int, dict[str, Any]]:
+        source_match = find_track_deck(self.raw_performance, source_id)
+        if source_match is None or source_match[1].play is not True:
+            return 409, {
+                "error": "recovery_source_must_be_playing",
+                "message": "Resume the source Deck before requesting live recovery.",
+            }
+        live_root = self.workspace / "experiments/live-performance"
+        if str(live_root) not in sys.path:
+            sys.path.insert(0, str(live_root))
+        from live_replanner import build_live_replan_selection
+        from plan_lifecycle import PerformanceSnapshot
+        from queue_service import QueueSnapshot as LiveQueueSnapshot
+
+        queue = LiveQueueSnapshot(
+            revision=int(self.queue["revision"]),
+            ordered_track_ids=tuple(self.queue["ordered_track_ids"]),
+            updated_at=str(self.queue["updated_at"]),
+        )
+        performance = PerformanceSnapshot.from_observer_state(self.raw_performance)
+        try:
+            recovered = build_live_replan_selection(
+                self.selection,
+                queue,
+                performance,
+                self.analysis_catalog,
+            )
+        except ValueError as error:
+            return 409, {
+                "error": "live_recovery_unavailable",
+                "detail": str(error),
+            }
+        plan = recovered["next_executable_plan"]
+        if (
+            plan["deck_a"]["audio_sha256"] != source_id
+            or plan["deck_b"]["audio_sha256"] != target_id
+        ):
+            return 409, {"error": "live_recovery_identity_mismatch"}
+        self.selection = recovered
+        self.envelope = None
+        self.supervisor = None
+        self.transition_overrides[(source_id, target_id)] = {
+            "status": "ready",
+            "selectedBy": "deterministic_fallback",
+            "reason": "Original Meta draft expired; selected the next analyzed live downbeat.",
+        }
+        self._write_dashboard_selection(recovered)
+        return 200, {
+            "accepted": True,
+            "status": "ready",
+            "selected_by": "deterministic_fallback",
+            "model_called": False,
+            "plan_id": plan["plan_id"],
+            "message": "Expired following draft recovered from the authoritative live beat.",
+        }
+
+    def _write_dashboard_selection(self, selection: dict[str, Any]) -> None:
+        output = (
+            self.workspace
+            / "artifacts/live-performance/dashboard-meta-selection-v1.json"
+        )
+        temporary = output.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(selection, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(output)
+
+    def _restore_following_override(self) -> None:
+        draft = self.selection.get("following_feasible_draft")
+        if not isinstance(draft, dict) or draft.get("status") != "feasible_not_armed":
+            return
+        source_id = str(draft["source_track_id"])
+        target_id = str(draft["target_track_id"])
+        self.transition_overrides[(source_id, target_id)] = {
+            "status": "feasible",
+            "selectedBy": "meta",
+            "reason": "Meta preserved this next transition; it is not loaded or armed.",
+            "sourceExitBeat": int(draft["source_exit_beat_index"]),
+            "targetEntryBeat": int(draft["target_entry_beat_index"]),
+            "bars": int(draft["transition_bars"]),
+        }
 
     def _compile_meta_selection(
         self,
@@ -297,49 +473,18 @@ class LiveStateStore:
         target_deck: int,
     ) -> dict[str, Any]:
         source_id, target_id, following_id = track_ids
-        source = self.analysis_catalog.tracks[source_id]
-        target = self.analysis_catalog.tracks[target_id]
-        beats = int(candidate["ab_transition_bars"]) * 4
-        transition_start = int(candidate["a_exit_beat_index"])
-        plan_id = f"meta-q{self.queue['revision']}-{candidate['candidate_id']}"
-        plan = {
-            "schema_version": 1,
-            "schema_uri": "schemas/dj-transition-plan-v1.schema.json",
-            "plan_id": plan_id,
-            "source": f"meta_model_api_{model.replace('-', '_').replace('.', '_')}",
-            "source_start_mode": "continue_playing",
-            "completion_mode": "continue_target",
-            "deck_a": {
-                "audio_sha256": source_id,
-                "analysis_cache_key": source.analysis_cache_key,
-                "analysis_filename": "track-analysis-v1.json",
-                "deck": source_deck,
-                "play_start_beat_index": max(0, transition_start - 8),
-                "transition_start_beat_index": transition_start,
-                "transition_end_beat_index": transition_start + beats,
-            },
-            "deck_b": {
-                "audio_sha256": target_id,
-                "analysis_cache_key": target.analysis_cache_key,
-                "analysis_filename": "track-analysis-v1.json",
-                "deck": target_deck,
-                "cue_beat_index": int(candidate["b_entry_beat_index"]),
-            },
-            "mix": {
-                "bars": int(candidate["ab_transition_bars"]),
-                "beats": beats,
-                "beats_per_bar": 4,
-                "crossfader_curve": "linear",
-                "steps": 33,
-                "tail_beats": beats,
-                "tempo_source": "deck_a_sync_leader",
-            },
-        }
-        if bool(decision["use_bass_swap"]):
-            plan["mix"]["bass_swap"] = {
-                "start_beat": beats // 4,
-                "end_beat": beats * 3 // 4,
-            }
+        plan = self._build_executable_plan(
+            source_id=source_id,
+            target_id=target_id,
+            source_exit_beat=int(candidate["a_exit_beat_index"]),
+            target_entry_beat=int(candidate["b_entry_beat_index"]),
+            transition_bars=int(candidate["ab_transition_bars"]),
+            model=model,
+            source_deck=source_deck,
+            target_deck=target_deck,
+            plan_suffix=str(candidate["candidate_id"]),
+            use_bass_swap=bool(decision["use_bass_swap"]),
+        )
         return {
             "schema_version": 1,
             "selection": "meta_model_api_single_call",
@@ -359,6 +504,63 @@ class LiveStateStore:
                 "transition_bars": int(candidate["bc_transition_bars"]),
             },
         }
+
+    def _build_executable_plan(
+        self,
+        *,
+        source_id: str,
+        target_id: str,
+        source_exit_beat: int,
+        target_entry_beat: int,
+        transition_bars: int,
+        model: str,
+        source_deck: int,
+        target_deck: int,
+        plan_suffix: str,
+        use_bass_swap: bool,
+    ) -> dict[str, Any]:
+        source = self.analysis_catalog.tracks[source_id]
+        target = self.analysis_catalog.tracks[target_id]
+        beats = transition_bars * 4
+        plan = {
+            "schema_version": 1,
+            "schema_uri": "schemas/dj-transition-plan-v1.schema.json",
+            "plan_id": f"meta-q{self.queue['revision']}-{plan_suffix}",
+            "source": f"meta_model_api_{model.replace('-', '_').replace('.', '_')}",
+            "source_start_mode": "continue_playing",
+            "completion_mode": "continue_target",
+            "deck_a": {
+                "audio_sha256": source_id,
+                "analysis_cache_key": source.analysis_cache_key,
+                "analysis_filename": "track-analysis-v1.json",
+                "deck": source_deck,
+                "play_start_beat_index": max(0, source_exit_beat - 8),
+                "transition_start_beat_index": source_exit_beat,
+                "transition_end_beat_index": source_exit_beat + beats,
+            },
+            "deck_b": {
+                "audio_sha256": target_id,
+                "analysis_cache_key": target.analysis_cache_key,
+                "analysis_filename": "track-analysis-v1.json",
+                "deck": target_deck,
+                "cue_beat_index": target_entry_beat,
+            },
+            "mix": {
+                "bars": transition_bars,
+                "beats": beats,
+                "beats_per_bar": 4,
+                "crossfader_curve": "linear",
+                "steps": 33,
+                "tail_beats": beats,
+                "tempo_source": "deck_a_sync_leader",
+            },
+        }
+        if use_bass_swap:
+            plan["mix"]["bass_swap"] = {
+                "start_beat": beats // 4,
+                "end_beat": beats * 3 // 4,
+            }
+        return plan
 
     def request_takeover(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
@@ -430,6 +632,16 @@ class LiveStateStore:
             None,
         )
         if current_id is None:
+            crossfader = float(performance.crossfader or 0)
+            favored_deck = 2 if crossfader > 0.25 else 1 if crossfader < -0.25 else None
+            if favored_deck is not None:
+                favored_id = performance.decks[favored_deck].track_id
+                if favored_id in loaded_ids:
+                    current_id = favored_id
+        if current_id is None:
+            if self.current_track_id in loaded_ids:
+                current_id = self.current_track_id
+        if current_id is None:
             current_id = next(
                 (track_id for track_id in reversed(queue_ids) if track_id in loaded_ids),
                 queue_ids[0] if queue_ids else None,
@@ -471,6 +683,16 @@ class LiveStateStore:
             )
 
         plan_payload = self.selection["next_executable_plan"]
+        source_analysis = self.catalog[plan_payload["deck_a"]["audio_sha256"]]
+        source_beats = source_analysis["rhythm"]["beats_seconds"]
+        source_duration = float(source_analysis["duration_seconds"])
+        target_analysis = self.catalog[plan_payload["deck_b"]["audio_sha256"]]
+        target_beats = target_analysis["rhythm"]["beats_seconds"]
+        target_duration = float(target_analysis["duration_seconds"])
+
+        def beat_progress(index: int) -> float:
+            return min(1.0, max(0.0, float(source_beats[index]) / source_duration))
+
         context = self.selection.get("replan_context", {})
         candidate = self.selection.get(
             "selected_candidate",
@@ -500,8 +722,26 @@ class LiveStateStore:
             "status": plan_status,
             "sourceTrackId": plan_payload["deck_a"]["audio_sha256"],
             "targetTrackId": plan_payload["deck_b"]["audio_sha256"],
+            "sourceCueBeat": int(plan_payload["deck_a"]["play_start_beat_index"]),
             "sourceExitBeat": int(plan_payload["deck_a"]["transition_start_beat_index"]),
+            "sourceCuePosition": beat_progress(
+                int(plan_payload["deck_a"]["play_start_beat_index"])
+            ),
+            "sourceMixStartPosition": beat_progress(
+                int(plan_payload["deck_a"]["transition_start_beat_index"])
+            ),
+            "sourceMixEndPosition": beat_progress(
+                int(plan_payload["deck_a"]["transition_end_beat_index"])
+            ),
             "targetEntryBeat": int(plan_payload["deck_b"]["cue_beat_index"]),
+            "targetEntryPosition": min(
+                1.0,
+                max(
+                    0.0,
+                    float(target_beats[int(plan_payload["deck_b"]["cue_beat_index"])])
+                    / target_duration,
+                ),
+            ),
             "bars": int(plan_payload["mix"]["bars"]),
             "intent": str(self.selection.get("intent", "maintain_energy")).replace("_", " ").title(),
             "confidence": min(1.0, max(0.0, confidence)),

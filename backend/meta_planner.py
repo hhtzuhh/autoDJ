@@ -95,7 +95,7 @@ def build_rolling_candidates(
     following_pairing: dict[str, Any],
     *,
     intent: Intent = "maintain_energy",
-    minimum_dwell_beats: int = 32,
+    minimum_dwell_beats: int = 64,
     limit: int = MAX_MODEL_CANDIDATES,
 ) -> list[dict[str, Any]]:
     if intent not in ALLOWED_INTENTS:

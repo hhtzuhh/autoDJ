@@ -17,6 +17,15 @@ the observer's uniquely resolved catalog identity, or leave it unresolved.
 The UI must never infer execution from a model decision; execution status comes
 from the local supervisor/executor event stream.
 
+The plan exposes `sourceCueBeat` separately from `sourceExitBeat`. The former
+is the executor's preparation/play-start point and drives the visible countdown;
+the latter begins the actual mix window. The UI may derive the window end from
+`sourceExitBeat + bars * 4`, but must not guess the cue beat from that value.
+The live adapter also publishes normalized cue, mix-start, and mix-end positions
+calculated from the analyzed beat timestamps so waveform markers do not rely on
+a constant-BPM estimate. `targetEntryPosition` provides the same analyzed
+timestamp mapping for the incoming Deck's entry marker.
+
 ## Transition edges
 
 `transitions` contains one directional edge for every adjacent pair in the
@@ -27,6 +36,8 @@ lifecycle:
 - `analyzed`: deterministic candidates exist, but no plan is selected;
 - `planning`: the current A–B–C window is awaiting a bounded model decision;
 - `ready`: a selection exists for the current window;
+- `feasible`: the rolling selection preserved this following edge and its
+  timing, but the target is not necessarily loaded, cued, or armed;
 - `blocked`: deterministic analysis produced no compatible candidate;
 - `invalidated`: a previously selected edge no longer matches current state.
 
@@ -42,3 +53,9 @@ A valid single-call model choice moves the edge to `ready` with
 `selectedBy: "meta"`; a request or validation failure returns it to `analyzed`
 with a non-secret reason. The model name, confidence, and reason shown in the
 plan come from the validated selection artifact rather than UI defaults.
+
+When the current transition completes, a still-future `feasible` following
+draft can be promoted locally after its target is loaded into the free Deck;
+this makes no second model call. If its exit has expired, the live replanner may
+select a later analyzed downbeat and must label the result
+`deterministic_fallback`. It never rewinds the playing source automatically.

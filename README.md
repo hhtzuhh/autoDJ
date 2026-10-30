@@ -99,8 +99,20 @@ Boots → Bass → Boomerang candidates and passed strict local validation. The
 live endpoint was also tested against the then-current Mixxx state: it returned
 HTTP 409 because the current queue position did not have both a next and a
 following track. That rejection caused no Mixxx write and is the expected
-rolling-window behavior; a live Meta-selected plan has not yet been armed from
-this dashboard.
+rolling-window behavior.
+
+Later live acceptance on 2026-10-30 armed and completed a Meta-selected
+Boots → Bass transition from the dashboard. The same single Meta call preserved
+a Bass → Boomerang following draft, and the UI displayed analyzed cue, mix
+window, and incoming-entry markers on both Deck waveforms. The first transition
+completed successfully, but its 32-beat executor tail plus the manual Deck swap
+caused the preserved second exit to expire before promotion. The system rejected
+the stale draft without seeking backward. After an explicit human pause and
+rewind, the deterministic live replanner selected Bass beat 348 → Boomerang
+beat 228; the second transition completed with executor return code 0 and
+Boomerang continuing on Deck 1. This validates fail-closed recovery, not an
+uninterrupted three-track run. Automatic Deck loading or a larger end-to-end
+swap runway remains required.
 
 For a production build:
 

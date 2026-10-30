@@ -22,6 +22,7 @@ TransitionStatus = Literal[
     "analyzed",
     "planning",
     "ready",
+    "feasible",
     "blocked",
     "invalidated",
 ]

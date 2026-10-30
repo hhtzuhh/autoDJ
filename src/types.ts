@@ -39,6 +39,7 @@ export type TransitionEdgeStatus =
   | "analyzed"
   | "planning"
   | "ready"
+  | "feasible"
   | "blocked"
   | "invalidated";
 
@@ -51,6 +52,9 @@ export interface TransitionEdge {
   selectedBy: "meta" | "deterministic_fallback" | "fixture" | null;
   reason: string | null;
   queueRevision: number;
+  sourceExitBeat?: number;
+  targetEntryBeat?: number;
+  bars?: number;
 }
 
 export interface TransitionPlan {
@@ -58,8 +62,13 @@ export interface TransitionPlan {
   status: LifecycleStatus;
   sourceTrackId: string;
   targetTrackId: string;
+  sourceCueBeat: number;
   sourceExitBeat: number;
+  sourceCuePosition: number;
+  sourceMixStartPosition: number;
+  sourceMixEndPosition: number;
   targetEntryBeat: number;
+  targetEntryPosition: number;
   bars: number;
   intent: string;
   confidence: number;

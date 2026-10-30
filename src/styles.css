@@ -115,13 +115,23 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .album--small { width: 34px; height: 34px; border-radius: 9px; font-size: 13px; }
 
 .waveform { height: 36px; position: relative; overflow: hidden; border-radius: 8px; background: rgba(255,255,255,.025); border: 1px solid rgba(255,255,255,.04); }
-.waveform__bars { position: absolute; inset: 6px 8px; display: flex; align-items: center; gap: 3px; }
+.waveform-block { min-width: 0; }
+.waveform__bars { position: absolute; z-index: 1; inset: 6px 8px; display: flex; align-items: center; gap: 3px; }
 .waveform__bars span { flex: 1; min-width: 2px; border-radius: 2px; background: rgba(255,255,255,.13); transition: background .2s; }
 .waveform--violet .waveform__bars span.is-played { background: var(--violet); }
 .waveform--cyan .waveform__bars span.is-played { background: var(--cyan); }
 .waveform--amber .waveform__bars span.is-played { background: var(--amber); }
-.waveform__needle { position: absolute; top: 4px; bottom: 4px; width: 1px; background: white; box-shadow: 0 0 12px rgba(255,255,255,.7); }
+.waveform__mix-window { position: absolute; z-index: 2; top: 3px; bottom: 3px; min-width: 3px; border-left: 1px solid var(--amber); border-right: 1px solid var(--amber); background: rgba(255,197,107,.2); }
+.waveform__cue-marker { position: absolute; z-index: 3; top: 2px; bottom: 2px; width: 1px; background: var(--cyan); box-shadow: 0 0 8px rgba(117,220,244,.7); }
+.waveform__entry-marker { position: absolute; z-index: 3; top: 2px; bottom: 2px; width: 1px; background: var(--green); box-shadow: 0 0 8px rgba(107,231,174,.7); }
+.waveform__needle { position: absolute; z-index: 4; top: 4px; bottom: 4px; width: 1px; background: white; box-shadow: 0 0 12px rgba(255,255,255,.7); }
 .waveform__needle::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: white; position: absolute; top: -1px; left: -2px; }
+.waveform-labels { height: 14px; position: relative; font: 600 8px "DM Mono", monospace; letter-spacing: .04em; text-transform: uppercase; }
+.waveform-labels.has-window { height: 25px; }
+.waveform-labels span { position: absolute; top: 3px; white-space: nowrap; transform: translateX(-50%); }
+.waveform-labels .is-cue { color: var(--cyan); }
+.waveform-labels .is-mix { top: 14px; color: var(--amber); }
+.waveform-labels .is-entry { color: var(--green); }
 .deck-card__readout { justify-content: space-between; margin-top: 9px; }
 .deck-card__readout strong { font: 500 17px "DM Mono", monospace; }
 .deck-card__readout span { color: var(--muted); font: 400 11px "DM Mono", monospace; }
@@ -163,7 +173,7 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .plan-route__bridge > div::after { transform: rotate(180deg); }
 .plan-route__bridge i { width: 3px; height: 3px; border-radius: 50%; background: var(--violet); }
 
-.cue-grid { display: grid; grid-template-columns: repeat(3,1fr); margin: 14px 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.cue-grid { display: grid; grid-template-columns: repeat(4,1fr); margin: 14px 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .cue-grid > div { padding: 12px 14px; display: flex; flex-direction: column; }
 .cue-grid > div + div { border-left: 1px solid var(--line); }
 .cue-grid span { font: 400 10px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; }
@@ -196,6 +206,7 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .transition-edge span + span, .transition-edge small { padding-left: 7px; border-left: 1px solid var(--line); }
 .transition-edge small { color: var(--muted); font: inherit; }
 .transition-edge--ready { color: var(--green); }
+.transition-edge--feasible { color: var(--cyan); }
 .transition-edge--planning, .transition-edge--analyzing { color: var(--amber); }
 .transition-edge--blocked, .transition-edge--invalidated { color: var(--red); }
 .transition-edge--pending { color: var(--muted); }

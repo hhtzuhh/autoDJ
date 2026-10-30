@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from live_bridge import LiveStateStore
+from live_bridge import LiveStateStore, find_track_deck
 from meta_planner import (
     MetaDecision,
     build_rolling_candidates,
@@ -39,7 +39,7 @@ class MetaPlannerTest(unittest.TestCase):
         self.following = {
             "pairs": [
                 pair(1, 70, 20, 0.95),
-                pair(2, 100, 24, 0.8),
+                pair(2, 140, 24, 0.8),
             ]
         }
         self.candidates = build_rolling_candidates(
@@ -67,7 +67,7 @@ class MetaPlannerTest(unittest.TestCase):
             )
         )
         self.assertTrue(
-            all(row["b_exit_beat_index"] == 100 for row in self.candidates)
+            all(row["b_exit_beat_index"] == 140 for row in self.candidates)
         )
 
     def test_prompt_contains_only_local_candidates(self) -> None:
@@ -148,6 +148,92 @@ class MetaPlannerTest(unittest.TestCase):
             self.candidates[0]["a_exit_beat_index"],
         )
         self.assertEqual(plan["source"], "meta_model_api_muse_test")
+
+    def test_observer_deck_number_comes_from_dictionary_key(self) -> None:
+        performance = SimpleNamespace(
+            decks={
+                1: SimpleNamespace(track_id="a", beat_index=12),
+                2: SimpleNamespace(track_id="b", beat_index=20),
+            }
+        )
+
+        match = find_track_deck(performance, "b")
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match[0], 2)
+        self.assertEqual(match[1].beat_index, 20)
+
+    def test_following_draft_is_visible_but_not_marked_ready(self) -> None:
+        store = object.__new__(LiveStateStore)
+        store.transition_overrides = {}
+        store.selection = {
+            "following_feasible_draft": {
+                "status": "feasible_not_armed",
+                "source_track_id": "b",
+                "target_track_id": "c",
+                "source_exit_beat_index": 288,
+                "target_entry_beat_index": 72,
+                "transition_bars": 8,
+            }
+        }
+
+        store._restore_following_override()
+
+        edge = store.transition_overrides[("b", "c")]
+        self.assertEqual(edge["status"], "feasible")
+        self.assertEqual(edge["sourceExitBeat"], 288)
+        self.assertEqual(edge["targetEntryBeat"], 72)
+
+    def test_loaded_following_draft_promotes_without_another_model_call(self) -> None:
+        store = object.__new__(LiveStateStore)
+        store.queue = {"revision": 3}
+        store.analysis_catalog = SimpleNamespace(
+            tracks={
+                "b": SimpleNamespace(analysis_cache_key="b-key"),
+                "c": SimpleNamespace(analysis_cache_key="c-key"),
+            }
+        )
+        store.raw_performance = SimpleNamespace(
+            decks={
+                1: SimpleNamespace(track_id="c", beat_index=0),
+                2: SimpleNamespace(track_id="b", beat_index=250),
+            }
+        )
+        store.selection = {
+            "intent": "maintain_energy",
+            "model": "muse-test",
+            "model_decision": {
+                "selected_candidate_id": "abc-1",
+                "intent": "maintain_energy",
+                "use_bass_swap": False,
+                "confidence": 0.8,
+                "reason": "Selected both legs.",
+            },
+            "following_feasible_draft": {
+                "status": "feasible_not_armed",
+                "source_track_id": "b",
+                "target_track_id": "c",
+                "source_exit_beat_index": 288,
+                "target_entry_beat_index": 72,
+                "transition_bars": 8,
+            },
+        }
+        store.transition_overrides = {}
+        store.envelope = None
+        store.supervisor = None
+        written = []
+        store._write_dashboard_selection = written.append
+
+        status, payload = store._promote_following_draft("b", "c")
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["model_called"])
+        self.assertEqual(len(written), 1)
+        plan = store.selection["next_executable_plan"]
+        self.assertEqual(plan["deck_a"]["deck"], 2)
+        self.assertEqual(plan["deck_b"]["deck"], 1)
+        self.assertEqual(plan["deck_a"]["transition_start_beat_index"], 288)
 
 
 if __name__ == "__main__":
