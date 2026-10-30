@@ -40,6 +40,7 @@ from meta_planner import (  # noqa: E402
     load_dotenv,
     select_with_meta,
 )
+from set_builder import SetBuilderService  # noqa: E402
 
 
 DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
@@ -117,6 +118,7 @@ class LiveStateStore:
         self._restore_following_override()
         self.envelope = self._load_envelope()
         self.catalog = self._load_catalog()
+        self.set_builder = SetBuilderService(workspace)
 
     def _load_selection(self) -> dict[str, Any]:
         candidates = (
@@ -170,7 +172,34 @@ class LiveStateStore:
 
     def snapshot(self) -> tuple[dict[str, Any] | None, str | None]:
         with self.lock:
-            return self.state, self.error
+            state = deepcopy(self.state) if self.state is not None else None
+            error = self.error
+        if state is not None:
+            state["setBuilder"] = self.set_builder.snapshot()
+        return state, error
+
+    def request_set_build(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if self.supervisor and self.supervisor.executor is not None:
+            return 409, {"error": "cannot replace the prepared set while a transition executes"}
+        try:
+            prompt = str(payload.get("prompt", ""))
+            count = int(payload.get("count", 10))
+            return 202, self.set_builder.build(prompt, count)
+        except (TypeError, ValueError) as error:
+            return 400, {"error": str(error)}
+        except Exception as error:
+            return 502, {"error": str(error)}
+
+    def request_queue_reorder(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if self.supervisor and self.supervisor.executor is not None:
+            return 409, {"error": "queue is locked while a transition executes"}
+        try:
+            ordered = payload.get("orderedTrackIds")
+            if not isinstance(ordered, list):
+                raise ValueError("orderedTrackIds must be a list")
+            return 200, self.set_builder.reorder(ordered)
+        except (TypeError, ValueError) as error:
+            return 400, {"error": str(error)}
 
     def request_arm(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
@@ -998,6 +1027,20 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(encoded)
 
+        def _request_json(self) -> dict[str, Any]:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as error:
+                raise ValueError("invalid Content-Length") from error
+            if length <= 0:
+                return {}
+            if length > 64 * 1024:
+                raise ValueError("request body is too large")
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            return payload
+
         def do_GET(self) -> None:  # noqa: N802
             state, error = store.snapshot()
             if self.path == "/api/health":
@@ -1032,6 +1075,11 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802
+            try:
+                payload = self._request_json()
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                self._json(400, {"error": str(error)})
+                return
             if self.path == "/api/plan":
                 status, payload = store.request_meta_plan()
                 self._json(status, payload)
@@ -1043,6 +1091,14 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
             if self.path == "/api/takeover":
                 status, payload = store.request_takeover()
                 self._json(status, payload)
+                return
+            if self.path == "/api/set-builder/build":
+                status, response = store.request_set_build(payload)
+                self._json(status, response)
+                return
+            if self.path == "/api/queue/reorder":
+                status, response = store.request_queue_reorder(payload)
+                self._json(status, response)
                 return
             self._json(404, {"error": "not found"})
 

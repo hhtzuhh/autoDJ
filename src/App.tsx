@@ -289,39 +289,125 @@ function PlanPanel({ state }: { state: CopilotState }) {
   );
 }
 
-function QueuePanel({ state }: { state: CopilotState }) {
-  const transitions =
-    state.transitions
-    ?? (state.dataSource === "simulation" ? initialState.transitions : []);
+function QueuePanel({
+  state,
+  disabled,
+  notice,
+  onBuild,
+  onReorder,
+}: {
+  state: CopilotState;
+  disabled: boolean;
+  notice: string | null;
+  onBuild: (prompt: string, count: number) => Promise<void>;
+  onReorder: (trackIds: string[]) => Promise<void>;
+}) {
+  const [prompt, setPrompt] = useState("今天幫我排 10 首 house，能量慢慢往上");
+  const [count, setCount] = useState(10);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const builder = state.dataSource === "live" ? state.setBuilder : undefined;
+  const prepared = Boolean(builder?.queue.length);
+  const shownQueue = prepared ? builder!.queue : state.queue;
+  const transitions = prepared
+    ? builder!.transitions
+    : state.transitions ?? (state.dataSource === "simulation" ? initialState.transitions : []);
   const edgeAfter = new Map(
     transitions.map((transition) => [
       transition.sourceTrackId,
       transition,
     ]),
   );
+  const dropBefore = (targetId: string) => {
+    if (!builder || !draggedId || draggedId === targetId) return;
+    const ordered = builder.orderedTrackIds.filter((id) => id !== draggedId);
+    ordered.splice(ordered.indexOf(targetId), 0, draggedId);
+    setDraggedId(null);
+    void onReorder(ordered);
+  };
   return (
     <section className="panel queue-panel">
       <div className="panel__header">
         <div>
-          <span className="eyebrow">Revision {state.queueRevision}</span>
-          <h2>Queue</h2>
+          <span className="eyebrow">
+            {prepared ? `Preparation revision ${builder!.queueRevision}` : `Revision ${state.queueRevision}`}
+          </span>
+          <h2>{prepared ? "Tonight’s set" : "Queue"}</h2>
         </div>
-        <span className="count-badge">{state.queue.length} tracks</span>
+        <span className="count-badge">{shownQueue.length} tracks</span>
       </div>
+      {state.dataSource === "live" && (
+        <div className="set-builder">
+          <div className="set-builder__prompt">
+            <input
+              aria-label="Describe tonight's set"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="今天幫我排 10 首 house…"
+              disabled={disabled}
+            />
+            <input
+              className="set-builder__count"
+              aria-label="Track count"
+              type="number"
+              min={2}
+              max={Math.max(2, builder?.catalogCount ?? 50)}
+              value={count}
+              onChange={(event) => setCount(Number(event.target.value))}
+              disabled={disabled}
+            />
+            <button
+              className="button button--secondary"
+              disabled={disabled || !prompt.trim()}
+              onClick={() => void onBuild(prompt, count)}
+            >
+              <Icon name="spark" /> Build with Meta
+            </button>
+          </div>
+          <div className="set-builder__status">
+            <span className={`builder-state builder-state--${builder?.status ?? "idle"}`}>
+              {builder?.status ?? "idle"}
+            </span>
+            <span>{builder?.catalogCount ?? 0} local tracks</span>
+            {builder?.model && <span>{builder.model}</span>}
+            {builder?.activationReady && <strong>Ready to activate</strong>}
+          </div>
+          {(builder?.reason || builder?.error || notice) && (
+            <p className={builder?.error ? "set-builder__message is-error" : "set-builder__message"}>
+              {builder?.error || notice || builder?.reason}
+            </p>
+          )}
+        </div>
+      )}
       <div className="queue-list" role="list" aria-label="Performance queue">
-        {state.queue.map((track, index) => {
+        {shownQueue.map((track, index) => {
           const transition = edgeAfter.get(track.id);
+          const liveTrack = "state" in track ? track : null;
+          const analysisStatus = "analysisStatus" in track ? track.analysisStatus : null;
           return (
-            <div className="queue-item" key={track.id} role="listitem">
-              <div className={`queue-row queue-row--${track.state}`}>
+            <div
+              className={`queue-item ${draggedId === track.id ? "is-dragging" : ""}`}
+              key={track.id}
+              role="listitem"
+              draggable={prepared && !disabled}
+              onDragStart={() => setDraggedId(track.id)}
+              onDragEnd={() => setDraggedId(null)}
+              onDragOver={(event) => prepared && event.preventDefault()}
+              onDrop={() => dropBefore(track.id)}
+            >
+              <div className={`queue-row queue-row--${liveTrack?.state ?? "queued"}`}>
                 <span className="queue-row__number">
-                  {track.state === "current" ? <Icon name="play" /> : index + 1}
+                  {liveTrack?.state === "current" ? <Icon name="play" /> : index + 1}
                 </span>
                 <div className="queue-row__identity">
                   <strong>{track.title}</strong>
-                  <span>{track.bpm} BPM · {track.energy}</span>
+                  <span>
+                    {track.bpm ? `${Math.round(track.bpm)} BPM` : "BPM pending"}
+                    {"energy" in track ? ` · ${track.energy}` : ` · ${track.genre}`}
+                  </span>
                 </div>
-                <span className="queue-row__state">{track.state}</span>
+                <span className={`queue-row__state ${analysisStatus ? `analysis--${analysisStatus}` : ""}`}>
+                  {analysisStatus ?? liveTrack?.state}
+                </span>
               </div>
               {transition && <TransitionReadiness edge={transition} />}
             </div>
@@ -330,7 +416,11 @@ function QueuePanel({ state }: { state: CopilotState }) {
       </div>
       <div className="queue-note">
         <Icon name="shield" />
-        <p>Only adjacent pairs are analyzed. Reordering invalidates affected edges.</p>
+        <p>
+          {prepared
+            ? "Drag future tracks to reorder. Only changed adjacent edges are reanalyzed; the live Mixxx queue is untouched."
+            : "Only adjacent pairs are analyzed. Reordering invalidates affected edges."}
+        </p>
       </div>
     </section>
   );
@@ -621,6 +711,44 @@ function App() {
     }
   };
 
+  const buildSet = async (prompt: string, count: number) => {
+    setActionPending(true);
+    setActionNotice("Meta is curating the bounded local catalog…");
+    try {
+      const response = await fetch("http://127.0.0.1:8765/api/set-builder/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, count }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? `Bridge returned ${response.status}`);
+      setActionNotice("Queue accepted. Track and adjacent-pair analysis is running in the background.");
+    } catch (error) {
+      setActionNotice(`Rejected: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  const reorderSet = async (orderedTrackIds: string[]) => {
+    setActionPending(true);
+    setActionNotice("Updating only the changed adjacent transitions…");
+    try {
+      const response = await fetch("http://127.0.0.1:8765/api/queue/reorder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderedTrackIds }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? `Bridge returned ${response.status}`);
+      setActionNotice("Queue reordered; retained transition analyses were preserved.");
+    } catch (error) {
+      setActionNotice(`Rejected: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setActionPending(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -666,7 +794,13 @@ function App() {
 
         <div className="workspace-grid">
           <PlanPanel state={state} />
-          <QueuePanel state={state} />
+          <QueuePanel
+            state={state}
+            disabled={actionPending || state.plan.status === "executing"}
+            notice={actionNotice}
+            onBuild={buildSet}
+            onReorder={reorderSet}
+          />
           <EventLog events={state.events} />
         </div>
       </main>

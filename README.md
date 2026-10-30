@@ -24,6 +24,12 @@ separately validated local prototype.
   bridge can recycle the stopped Deck, verify the loaded C identity, promote
   the preserved B→C decision, and arm it without another model call. This
   automatic three-track path has completed a live Mixxx acceptance run.
+- Set-builder development slice implemented: the live UI can send a bounded
+  natural-language set request to Meta, show the chosen local tracks, run
+  missing per-track analysis in one background worker, and prepare only the
+  adjacent pair caches. Dragging a prepared track preserves unchanged edges
+  and schedules only new adjacencies. Prepared sets remain separate from the
+  currently executing Mixxx queue until a safe activation boundary is built.
 - The live bridge exposes separate **Plan with Meta** and **Approve & arm**
   actions. Planning makes one model request, validates the returned candidate
   locally, and never writes to Mixxx. Arming remains a distinct human action
@@ -71,6 +77,13 @@ Then open:
 ```text
 http://127.0.0.1:5173/?source=live
 ```
+
+The Queue panel now also exposes the development set builder. Its catalog is
+bounded to `local-assets/samples` by default; audio paths and source files are
+never returned to the browser. **Build with Meta** makes one strict curation
+call for membership and order, then reports track and edge analysis status as
+the local worker progresses. This preparation flow does not automatically
+replace tonight's Mixxx playlist or arm a transition.
 
 Observed Deck state is never overwritten directly. The Arm action never sends
 MIDI directly: it first creates a unique plan instance and delegates identity,

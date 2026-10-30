@@ -33,6 +33,16 @@ export interface QueueItem extends Track {
   state: "played" | "current" | "next" | "queued";
 }
 
+export interface PreparedTrack {
+  id: string;
+  title: string;
+  artist: string;
+  genre: string;
+  bpm: number;
+  durationSeconds: number;
+  analysisStatus: "pending" | "analyzing" | "ready" | "failed";
+}
+
 export type TransitionEdgeStatus =
   | "pending"
   | "analyzing"
@@ -99,4 +109,18 @@ export interface CopilotState {
   transitions: TransitionEdge[];
   plan: TransitionPlan;
   events: PerformanceEvent[];
+  setBuilder?: {
+    status: "idle" | "curating" | "analyzing" | "ready" | "error";
+    prompt: string;
+    model: string | null;
+    reason: string | null;
+    error: string | null;
+    queueRevision: number;
+    orderedTrackIds: string[];
+    queue: PreparedTrack[];
+    transitions: TransitionEdge[];
+    catalogCount: number;
+    activationReady: boolean;
+    updatedAt: string;
+  };
 }

@@ -143,6 +143,20 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .workspace-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "plan queue" "events queue"; align-items: start; gap: 16px; margin-top: 16px; }
 .plan-panel { grid-area: plan; }
 .queue-panel { grid-area: queue; align-self: stretch; }
+.set-builder { margin: 2px 0 12px; padding: 11px; border: 1px solid rgba(169,138,255,.2); border-radius: 10px; background: rgba(169,138,255,.045); }
+.set-builder__prompt { display: grid; grid-template-columns: minmax(0, 1fr) 58px auto; gap: 8px; }
+.set-builder__prompt input { min-width: 0; height: 36px; border: 1px solid rgba(255,255,255,.12); border-radius: 7px; padding: 0 10px; color: var(--text); background: rgba(5,7,12,.7); font: 500 13px inherit; }
+.set-builder__prompt input:focus { outline: 1px solid var(--violet); border-color: var(--violet); }
+.set-builder__count { text-align: center; }
+.set-builder__prompt .button { min-height: 36px; height: 36px; padding: 0 12px; white-space: nowrap; }
+.set-builder__status { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px; margin-top: 9px; color: var(--muted); font: 500 10px "DM Mono", monospace; text-transform: uppercase; }
+.set-builder__status strong { color: var(--cyan); }
+.builder-state { color: var(--muted); }
+.builder-state--curating, .builder-state--analyzing { color: var(--amber); }
+.builder-state--ready { color: var(--cyan); }
+.builder-state--error { color: var(--red); }
+.set-builder__message { margin: 8px 0 0; color: #b8bac5; font-size: 11px; line-height: 1.45; }
+.set-builder__message.is-error { color: #ff9aa7; }
 .workspace-grid > .event-panel { grid-area: events; margin-top: 0; }
 .panel { padding: 22px; }
 .panel__header { justify-content: space-between; margin-bottom: 20px; }
@@ -192,6 +206,9 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .queue-list { max-height: min(64vh, 680px); overflow-y: auto; display: flex; flex-direction: column; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.16) transparent; }
 .queue-row { min-height: 50px; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,.045); color: var(--muted); }
 .queue-item:last-child .queue-row { border-bottom: 0; }
+.queue-item[draggable="true"] { cursor: grab; }
+.queue-item[draggable="true"]:active { cursor: grabbing; }
+.queue-item.is-dragging { opacity: .42; }
 .queue-row--current { color: #f3f4f8; background: rgba(169,138,255,.08); box-shadow: inset 2px 0 var(--violet); }
 .queue-row--played { opacity: .55; }
 .queue-row__number { font: 500 11px "DM Mono", monospace; text-align: center; }
@@ -200,6 +217,9 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .queue-row__identity strong { min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queue-row__identity span { flex: 0 0 auto; font: 400 10px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
 .queue-row__state { font: 400 10px "DM Mono", monospace; text-transform: uppercase; }
+.queue-row__state.analysis--analyzing { color: var(--amber); }
+.queue-row__state.analysis--ready { color: var(--cyan); }
+.queue-row__state.analysis--failed { color: var(--red); }
 .transition-edge { min-height: 24px; margin-left: 20px; padding: 4px 10px 4px 21px; display: flex; align-items: center; gap: 8px; color: var(--muted); font: 500 9px "DM Mono", monospace; text-transform: uppercase; position: relative; }
 .transition-edge::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 8px; width: 1px; background: var(--line); }
 .transition-edge i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
@@ -269,6 +289,8 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
   .plan-route__bridge { display: none; }
   .cue-grid { grid-template-columns: 1fr; }
   .cue-grid > div + div { border-left: 0; border-top: 1px solid var(--line); }
+  .set-builder__prompt { grid-template-columns: minmax(0, 1fr) 58px; }
+  .set-builder__prompt .button { grid-column: 1 / -1; }
   .control-dock { left: 8px; right: 8px; bottom: 8px; padding: 10px; }
   .control-dock__context { display: none; }
   .control-dock__actions { display: grid; grid-template-columns: 1fr 1fr; }
