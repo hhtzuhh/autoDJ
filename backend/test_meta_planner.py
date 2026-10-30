@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
@@ -39,7 +41,7 @@ class MetaPlannerTest(unittest.TestCase):
         self.following = {
             "pairs": [
                 pair(1, 70, 20, 0.95),
-                pair(2, 140, 24, 0.8),
+                pair(2, 220, 24, 0.8),
             ]
         }
         self.candidates = build_rolling_candidates(
@@ -67,7 +69,7 @@ class MetaPlannerTest(unittest.TestCase):
             )
         )
         self.assertTrue(
-            all(row["b_exit_beat_index"] == 140 for row in self.candidates)
+            all(row["b_exit_beat_index"] == 220 for row in self.candidates)
         )
 
     def test_prompt_contains_only_local_candidates(self) -> None:
@@ -148,6 +150,7 @@ class MetaPlannerTest(unittest.TestCase):
             self.candidates[0]["a_exit_beat_index"],
         )
         self.assertEqual(plan["source"], "meta_model_api_muse_test")
+        self.assertEqual(plan["mix"]["tail_beats"], 8)
 
     def test_observer_deck_number_comes_from_dictionary_key(self) -> None:
         performance = SimpleNamespace(
@@ -184,6 +187,33 @@ class MetaPlannerTest(unittest.TestCase):
         self.assertEqual(edge["status"], "feasible")
         self.assertEqual(edge["sourceExitBeat"], 288)
         self.assertEqual(edge["targetEntryBeat"], 72)
+
+    def test_exact_set_list_must_match_queue_revision_and_order(self) -> None:
+        with TemporaryDirectory() as raw:
+            path = Path(raw) / "set-list.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "queue_revision": 3,
+                        "ordered_tracks": [
+                            {"track_id": "a"},
+                            {"track_id": "b"},
+                            {"track_id": "c"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = object.__new__(LiveStateStore)
+            store.set_list_manifest_path = path
+            store.queue = {
+                "revision": 3,
+                "ordered_track_ids": ["a", "b", "c"],
+            }
+
+            store._verify_set_list_edge("b", "c")
+            with self.assertRaisesRegex(RuntimeError, "edge_mismatch"):
+                store._verify_set_list_edge("a", "c")
 
     def test_loaded_following_draft_promotes_without_another_model_call(self) -> None:
         store = object.__new__(LiveStateStore)

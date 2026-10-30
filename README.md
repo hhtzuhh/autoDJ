@@ -19,6 +19,11 @@ separately validated local prototype.
   queue revision, plan provenance, and events into the dashboard. This bridge
   still depends on the sibling experimental workspace and is not yet the
   standalone public observer implementation.
+- Set-list adapter implemented: an analyzed, versioned runtime queue resolves
+  to hash-verified local audio and an ordered Mixxx playlist. After A→B, the
+  bridge can recycle the stopped Deck, verify the loaded C identity, promote
+  the preserved B→C decision, and arm it without another model call. This
+  automatic three-track path has completed a live Mixxx acceptance run.
 - The live bridge exposes separate **Plan with Meta** and **Approve & arm**
   actions. Planning makes one model request, validates the returned candidate
   locally, and never writes to Mixxx. Arming remains a distinct human action
@@ -41,7 +46,20 @@ Open the Vite URL, normally `http://127.0.0.1:5173`.
 
 ### Development live bridge
 
-From the private hackathon workspace, with the Mixxx MIDI mapping installed:
+First resolve the private development library into tonight's exact set list.
+The generated manifest and playlist remain outside the public repository:
+
+```bash
+python3 submission/backend/setlist_service.py \
+  --analysis-root artifacts/time-map \
+  --queue-state artifacts/live-performance/queue-state-v1.json \
+  --library-root local-assets/samples \
+  --playlist artifacts/live-performance/tonight-set-list.m3u8 \
+  --manifest artifacts/live-performance/tonight-set-list-v1.json
+```
+
+Open the generated playlist in Mixxx and leave its selection on the loaded B
+row. Then, with the Mixxx MIDI mapping installed:
 
 ```bash
 experiments/mixxx-control/.venv/bin/python \
@@ -59,7 +77,9 @@ MIDI directly: it first creates a unique plan instance and delegates identity,
 queue revision, transport, target-stop, and latest-arm checks to the existing
 lifecycle supervisor. Failed preconditions return HTTP 409 and leave Mixxx untouched.
 Takeover is enabled only for a dashboard-owned plan in `executing` state and
-uses the existing preserve-playback cancellation signal.
+uses the existing preserve-playback cancellation signal. During automatic
+Deck recycling, Takeover cancels the pending load/arm path and preserves the
+currently playing Deck.
 
 Live acceptance on 2026-10-30 observed Mixxx Deck 1 playing Boomerang. The
 bridge reported beat 209 at 95.410 seconds; the React view subsequently showed
@@ -112,7 +132,18 @@ rewind, the deterministic live replanner selected Bass beat 348 → Boomerang
 beat 228; the second transition completed with executor return code 0 and
 Boomerang continuing on Deck 1. This validates fail-closed recovery, not an
 uninterrupted three-track run. Automatic Deck loading or a larger end-to-end
-swap runway remains required.
+swap runway remained required in that acceptance run. The subsequent set-list
+loader reserves 128 beats of B dwell and reduces the executor cleanup tail to
+eight beats.
+
+The uninterrupted three-track acceptance on 2026-10-30 used the dedicated
+`Boots → Bass Addict → Boomerang` Mixxx playlist. One `muse-spark-1.3` call
+selected both legs. A→B completed with executor return code 0; the bridge then
+recycled Deck 1, loaded Boomerang, verified its full analysis identity,
+promoted the preserved B→C draft without another model call, and armed the
+second executor. B→C also returned 0. Final performance revision 33 showed
+Boomerang continuing on Deck 1, Bass stopped on Deck 2, and lifecycle status
+`completed`. No human Deck load occurred after the first arm.
 
 For a production build:
 
@@ -138,8 +169,8 @@ The tests verify that a ten-track queue creates nine directional pair analyses,
 reordering builds only new adjacent edges, caches are reused, incompatible
 tempo is blocked, and queues longer than ten tracks remain supported. They
 also verify bounded, temporally feasible A–B–C construction, strict Meta output
-validation, exactly one model call, and compilation into the executor plan
-shape.
+validation, exactly one model call, compilation into the executor plan shape,
+and exact playlist generation from hash-verified local audio.
 
 ## Demo interaction
 

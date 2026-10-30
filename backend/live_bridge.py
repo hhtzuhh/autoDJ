@@ -86,8 +86,14 @@ class LiveStateStore:
         self.supervisor: Any | None = None
         self.transition_overrides: dict[tuple[str, str], dict[str, Any]] = {}
         self.action_lock = threading.Lock()
+        self.auto_chain_cancel = threading.Event()
+        self.auto_chain_thread: threading.Thread | None = None
+        self.auto_chain_started_for: set[str] = set()
         self.queue = load_json(
             workspace / "artifacts/live-performance/queue-state-v1.json"
+        )
+        self.set_list_manifest_path = (
+            workspace / "artifacts/live-performance/tonight-set-list-v1.json"
         )
         self.analysis_catalog = AnalysisCatalog.from_root(
             workspace / "artifacts/time-map"
@@ -143,6 +149,20 @@ class LiveStateStore:
             payload = load_json(path)
             catalog[str(payload["audio_sha256"])] = payload
         return catalog
+
+    def _verify_set_list_edge(self, source_id: str, target_id: str) -> None:
+        if not self.set_list_manifest_path.exists():
+            raise RuntimeError("exact_set_list_manifest_missing")
+        manifest = load_json(self.set_list_manifest_path)
+        if int(manifest.get("queue_revision", -1)) != int(self.queue["revision"]):
+            raise RuntimeError("exact_set_list_revision_mismatch")
+        track_ids = [str(row["track_id"]) for row in manifest["ordered_tracks"]]
+        expected = [str(value) for value in self.queue["ordered_track_ids"]]
+        if track_ids != expected:
+            raise RuntimeError("exact_set_list_order_mismatch")
+        source_index = track_ids.index(source_id)
+        if source_index + 1 >= len(track_ids) or track_ids[source_index + 1] != target_id:
+            raise RuntimeError("exact_set_list_edge_mismatch")
 
     def set_error(self, message: str) -> None:
         with self.lock:
@@ -551,7 +571,7 @@ class LiveStateStore:
                 "beats_per_bar": 4,
                 "crossfader_curve": "linear",
                 "steps": 33,
-                "tail_beats": beats,
+                "tail_beats": 8,
                 "tempo_source": "deck_a_sync_leader",
             },
         }
@@ -562,8 +582,152 @@ class LiveStateStore:
             }
         return plan
 
+    def _append_system_event(self, title: str, detail: str) -> None:
+        self.events.appendleft(
+            {
+                "id": f"system-{time.time_ns()}",
+                "time": clock_time(),
+                "kind": "system",
+                "title": title,
+                "detail": detail,
+            }
+        )
+
+    def _maybe_start_auto_chain(self) -> None:
+        """Recycle the idle deck after a completed A→B leg, then arm B→C."""
+        supervisor = self.supervisor
+        if supervisor is None or supervisor.manager is None:
+            return
+        envelope = supervisor.manager.envelope
+        if envelope.status != "completed":
+            return
+        completed_plan_id = str(envelope.plan_id)
+        if completed_plan_id in self.auto_chain_started_for:
+            return
+        draft = self.selection.get("following_feasible_draft")
+        if not isinstance(draft, dict) or draft.get("status") != "feasible_not_armed":
+            return
+        plan = self.selection["next_executable_plan"]
+        source_id = str(draft["source_track_id"])
+        target_id = str(draft["target_track_id"])
+        recycled_deck = int(plan["deck_a"]["deck"])
+        self.auto_chain_started_for.add(completed_plan_id)
+        self.auto_chain_cancel.clear()
+        self.auto_chain_thread = threading.Thread(
+            target=self._auto_chain_worker,
+            args=(source_id, target_id, recycled_deck),
+            name="idj-auto-deck-rotation",
+            daemon=True,
+        )
+        self.auto_chain_thread.start()
+
+    def _auto_chain_worker(
+        self,
+        source_id: str,
+        target_id: str,
+        recycled_deck: int,
+    ) -> None:
+        """Load the next exact set-list row and fail closed on identity mismatch."""
+        try:
+            with self.lock:
+                performance = self.raw_performance
+            source_match = (
+                find_track_deck(performance, source_id)
+                if performance is not None
+                else None
+            )
+            recycled = (
+                performance.decks[recycled_deck]
+                if performance is not None
+                else None
+            )
+            if (
+                source_match is None
+                or source_match[1].play is not True
+                or recycled is None
+                or recycled.play is True
+            ):
+                raise RuntimeError("automatic_rotation_preconditions_failed")
+            if self.auto_chain_cancel.is_set():
+                return
+            self._verify_set_list_edge(source_id, target_id)
+
+            self._append_system_event(
+                "Loading next queue track",
+                f"Advancing tonight's exact Mixxx set list and loading its next row into Deck {recycled_deck}.",
+            )
+            mixxx_root = self.workspace / "experiments/mixxx-control"
+            if str(mixxx_root) not in sys.path:
+                sys.path.insert(0, str(mixxx_root))
+            import mido
+            from probe import port_name, send_library_value, send_load_value
+
+            with mido.open_output(port_name()) as output:
+                send_library_value(output, "next")
+                time.sleep(0.25)
+                if self.auto_chain_cancel.is_set():
+                    return
+                send_load_value(output, recycled_deck)
+
+            deadline = time.monotonic() + 6.0
+            loaded_id = None
+            while time.monotonic() < deadline:
+                if self.auto_chain_cancel.wait(0.05):
+                    return
+                with self.lock:
+                    latest = self.raw_performance
+                if latest is None:
+                    continue
+                loaded_id = latest.decks[recycled_deck].track_id
+                if loaded_id == target_id:
+                    break
+            else:
+                shown = loaded_id[:8] if loaded_id else "unresolved"
+                raise RuntimeError(f"loaded_track_identity_mismatch:{shown}")
+
+            self._append_system_event(
+                "Next track verified",
+                f"Deck {recycled_deck} matches the queued analysis ID; promoting the preserved Meta plan.",
+            )
+            if self.auto_chain_cancel.is_set():
+                return
+            status, payload = self.request_meta_plan()
+            if status != 200:
+                raise RuntimeError(
+                    f"following_plan_promotion_failed:{payload.get('error')}"
+                )
+            if self.auto_chain_cancel.is_set():
+                return
+            status, payload = self.request_arm()
+            if status != 202:
+                raise RuntimeError(f"following_plan_arm_failed:{payload.get('error')}")
+            self._append_system_event(
+                "Following transition armed",
+                "The preserved B→C plan is now controlled by the local lifecycle supervisor.",
+            )
+        except Exception as error:
+            self._append_system_event(
+                "Automatic deck rotation stopped",
+                f"{type(error).__name__}: {error}. Current playback was preserved.",
+            )
+
     def request_takeover(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
+            self.auto_chain_cancel.set()
+            if (
+                self.auto_chain_thread is not None
+                and self.auto_chain_thread.is_alive()
+                and (not self.supervisor or self.supervisor.executor is None)
+            ):
+                self._append_system_event(
+                    "Automatic deck rotation cancelled",
+                    "Human takeover stopped the pending queue load and follow-up arm.",
+                )
+                return 202, {
+                    "accepted": True,
+                    "status": "cancelled",
+                    "message": "Pending automatic deck rotation cancelled; current playback is preserved.",
+                }
             if not self.supervisor:
                 return 409, {"error": "no dashboard-owned plan is executing"}
             accepted, reason = self.supervisor.request_takeover()
@@ -802,6 +966,7 @@ class LiveStateStore:
         if supervisor is not None:
             supervisor.update(performance, observed_events)
             self.envelope = self._load_envelope()
+            self._maybe_start_auto_chain()
 
 
 def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
