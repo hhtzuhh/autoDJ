@@ -514,10 +514,7 @@ function App() {
           </div>
         )}
         <section className="hero-strip">
-          <div>
-            <span className="eyebrow">Live control room</span>
-            <h1>Keep the music moving.<br /><em>Keep the human in control.</em></h1>
-          </div>
+          <span className="eyebrow">Live control room</span>
           <div className="cue-countdown">
             <span>Next cue</span>
             <strong>{beatsUntilCue == null ? "—" : Math.max(0, beatsUntilCue)}</strong>
