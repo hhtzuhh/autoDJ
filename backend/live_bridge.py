@@ -662,28 +662,45 @@ class LiveStateStore:
             import mido
             from probe import port_name, send_library_value, send_load_value
 
+            loaded_id = recycled.track_id
+            attempt_limit = max(1, len(self.queue["ordered_track_ids"]))
             with mido.open_output(port_name()) as output:
-                send_library_value(output, "next")
-                time.sleep(0.25)
-                if self.auto_chain_cancel.is_set():
-                    return
-                send_load_value(output, recycled_deck)
+                for attempt in range(1, attempt_limit + 1):
+                    previous_id = loaded_id
+                    send_library_value(output, "next")
+                    time.sleep(0.25)
+                    if self.auto_chain_cancel.is_set():
+                        return
+                    send_load_value(output, recycled_deck)
 
-            deadline = time.monotonic() + 6.0
-            loaded_id = None
-            while time.monotonic() < deadline:
-                if self.auto_chain_cancel.wait(0.05):
-                    return
-                with self.lock:
-                    latest = self.raw_performance
-                if latest is None:
-                    continue
-                loaded_id = latest.decks[recycled_deck].track_id
-                if loaded_id == target_id:
-                    break
-            else:
-                shown = loaded_id[:8] if loaded_id else "unresolved"
-                raise RuntimeError(f"loaded_track_identity_mismatch:{shown}")
+                    deadline = time.monotonic() + 3.0
+                    saw_unresolved = False
+                    while time.monotonic() < deadline:
+                        if self.auto_chain_cancel.wait(0.05):
+                            return
+                        with self.lock:
+                            latest = self.raw_performance
+                        if latest is None:
+                            continue
+                        observed_id = latest.decks[recycled_deck].track_id
+                        if observed_id is None:
+                            saw_unresolved = True
+                            continue
+                        loaded_id = observed_id
+                        if loaded_id == target_id:
+                            break
+                        if loaded_id != previous_id or saw_unresolved:
+                            break
+                    if loaded_id == target_id:
+                        break
+                    shown = loaded_id[:8] if loaded_id else "unresolved"
+                    self._append_system_event(
+                        "Queue load retry",
+                        f"Deck {recycled_deck} loaded {shown}, not the queued target; advancing the exact set list again ({attempt}/{attempt_limit}).",
+                    )
+                else:
+                    shown = loaded_id[:8] if loaded_id else "unresolved"
+                    raise RuntimeError(f"loaded_track_identity_mismatch:{shown}")
 
             self._append_system_event(
                 "Next track verified",

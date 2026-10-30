@@ -54,6 +54,8 @@ interface WaveformWindow {
   mixEndPosition: number;
 }
 
+const ACTIVE_PLAN_STATUSES = ["draft", "ready", "armed", "executing", "replanning"];
+
 function Waveform({
   progress,
   accent,
@@ -141,7 +143,8 @@ function DeckCard({ deck, state }: { deck: DeckState; state: CopilotState }) {
   const progress = deck.track
     ? Math.min(1, deck.positionSeconds / deck.track.durationSeconds)
     : 0;
-  const planWindow = deck.track?.id === state.plan.sourceTrackId
+  const planIsActive = ACTIVE_PLAN_STATUSES.includes(state.plan.status);
+  const planWindow = planIsActive && deck.track?.id === state.plan.sourceTrackId
     ? {
         cueBeat: state.plan.sourceCueBeat,
         mixStartBeat: state.plan.sourceExitBeat,
@@ -151,7 +154,7 @@ function DeckCard({ deck, state }: { deck: DeckState; state: CopilotState }) {
         mixEndPosition: state.plan.sourceMixEndPosition,
       }
     : undefined;
-  const entryMarker = deck.track?.id === state.plan.targetTrackId
+  const entryMarker = planIsActive && deck.track?.id === state.plan.targetTrackId
     ? {
         beat: state.plan.targetEntryBeat,
         position: state.plan.targetEntryPosition,
@@ -397,8 +400,7 @@ function App() {
     ),
     [state.decks, state.plan.sourceTrackId],
   );
-  const planCanStillExecute = ["draft", "ready", "armed", "executing", "replanning"]
-    .includes(state.plan.status);
+  const planCanStillExecute = ACTIVE_PLAN_STATUSES.includes(state.plan.status);
   const beatsUntilCue = !planCanStillExecute || activeSourceDeck?.beatIndex == null
     ? null
     : state.plan.sourceCueBeat - activeSourceDeck.beatIndex;
