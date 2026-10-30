@@ -193,6 +193,7 @@ class SetBuilderService:
         library_root: Path | None = None,
         metadata_reader: Callable[[Path], dict[str, Any]] = probe_audio,
         curator: Callable[[tuple[CatalogTrack, ...], str, int], tuple[tuple[str, ...], str]] | None = None,
+        post_curator: Callable[[tuple[CatalogTrack, ...], str, int], tuple[tuple[str, ...], str]] | None = None,
         analyzer: Callable[[CatalogTrack], None] | None = None,
         pair_builder: Callable[[str, str], int] | None = None,
         start_worker: bool = True,
@@ -211,6 +212,7 @@ class SetBuilderService:
             metadata_reader=metadata_reader,
         )
         self.curator = curator or self._meta_curator
+        self.post_curator = post_curator or self._meta_post_curator
         self.analyzer = analyzer or self._run_analyzer
         self.pair_builder = pair_builder or self._build_pair
         self.state = self._initial_state()
@@ -233,6 +235,7 @@ class SetBuilderService:
             "transitions": [],
             "updatedAt": utc_now(),
             "activationReady": False,
+            "postAnalysisPlanning": "idle",
         }
         if self.state_path.exists():
             saved = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -276,6 +279,38 @@ class SetBuilderService:
             check=True,
             cwd=str(script.parent),
         )
+
+    @staticmethod
+    def _tempo_compatible(source: CatalogTrack, target: CatalogTrack) -> bool:
+        if source.bpm <= 0 or target.bpm <= 0:
+            return False
+        return abs(source.bpm / target.bpm - 1.0) <= 0.06
+
+    def _blocked_count(self, ordered: Iterable[str]) -> int:
+        return sum(
+            not self._tempo_compatible(self.catalog[source_id], self.catalog[target_id])
+            for source_id, target_id in adjacent_pairs(ordered)
+        )
+
+    def _meta_post_curator(
+        self, tracks: tuple[CatalogTrack, ...], prompt: str, count: int
+    ) -> tuple[tuple[str, ...], str]:
+        compatibility = {
+            track.id: [
+                candidate.id
+                for candidate in tracks
+                if candidate.id != track.id and self._tempo_compatible(track, candidate)
+            ]
+            for track in tracks
+        }
+        request = (
+            f"{prompt}\n\nThis is the post-analysis pass. Every BPM is now measured. "
+            "Prioritize executable adjacency above the earlier speculative order and minimize "
+            "the number of adjacent pairs not present in compatible_followers. The catalog may "
+            "make a fully compatible ordering impossible; do not invent compatibility. "
+            f"compatible_followers={json.dumps(compatibility, separators=(',', ':'))}"
+        )
+        return self._meta_curator(tracks, request, count)
 
     def _build_pair(self, source_id: str, target_id: str) -> int:
         catalog = AnalysisCatalog.from_root(self.analysis_root)
@@ -336,6 +371,20 @@ class SetBuilderService:
                 edge = self._find_edge(source_id, target_id)
                 if edge and edge["status"] not in {"analyzed", "ready", "blocked", "analyzing"}:
                     self._enqueue(("pair", source_id, target_id))
+        tracks_ready = bool(ordered) and all(
+            self.state["trackStatuses"].get(track_id) == "ready" for track_id in ordered
+        )
+        edges_settled = len(self.state["transitions"]) == max(0, len(ordered) - 1) and all(
+            edge["status"] in {"analyzed", "blocked"} for edge in self.state["transitions"]
+        )
+        if (
+            tracks_ready
+            and edges_settled
+            and any(edge["status"] == "blocked" for edge in self.state["transitions"])
+            and self.state.get("postAnalysisPlanning") in {"idle", "pending"}
+        ):
+            self.state["postAnalysisPlanning"] = "pending"
+            self._enqueue(("post_plan",))
 
     def _find_edge(self, source_id: str, target_id: str) -> dict[str, Any] | None:
         return next(
@@ -360,6 +409,16 @@ class SetBuilderService:
             self.state["status"] = "error"
         elif self.state["activationReady"]:
             self.state["status"] = "ready"
+        elif self.state.get("postAnalysisPlanning") == "running":
+            self.state["status"] = "planning"
+        elif (
+            tracks_ready
+            and self.state.get("postAnalysisPlanning") in {"completed", "failed"}
+            and self.state["transitions"]
+            and all(edge["status"] in {"analyzed", "blocked"} for edge in self.state["transitions"])
+            and any(edge["status"] == "blocked" for edge in self.state["transitions"])
+        ):
+            self.state["status"] = "blocked"
         elif ordered:
             self.state["status"] = "analyzing"
         else:
@@ -394,6 +453,7 @@ class SetBuilderService:
             self.state["reason"] = reason
             self.state["error"] = None
             self.state["transitions"] = []
+            self.state["postAnalysisPlanning"] = "pending"
             self._refresh_edges()
             self._schedule_current()
             self._recompute_status()
@@ -452,6 +512,8 @@ class SetBuilderService:
                     self._work_track(job[1])
                 elif job[0] == "pair":
                     self._work_pair(job[1], job[2])
+                elif job[0] == "post_plan":
+                    self._work_post_plan()
             finally:
                 with self.lock:
                     self.queued_jobs.discard(job)
@@ -504,6 +566,7 @@ class SetBuilderService:
                     edge["candidateCount"] = int(count)
                     edge["status"] = "analyzed" if count else "blocked"
                     edge["reason"] = None if count else "no_compatible_candidates"
+                self._schedule_current()
                 self._recompute_status()
                 self._persist()
         except Exception as error:
@@ -513,5 +576,34 @@ class SetBuilderService:
                     edge["status"] = "blocked"
                     edge["reason"] = str(error)
                 self.state["error"] = f"transition {source_id[:8]}→{target_id[:8]}: {error}"
+                self._recompute_status()
+                self._persist()
+
+    def _work_post_plan(self) -> None:
+        with self.lock:
+            if self.state.get("postAnalysisPlanning") not in {"idle", "pending"}:
+                return
+            current = tuple(str(value) for value in self.state["orderedTrackIds"])
+            before_blocked = self._blocked_count(current)
+            self.state["postAnalysisPlanning"] = "running"
+            self._recompute_status()
+            self._persist()
+            tracks = tuple(self.catalog[track_id] for track_id in current)
+            prompt = str(self.state["prompt"])
+        try:
+            ordered, reason = self.post_curator(tracks, prompt, len(tracks))
+            after_blocked = self._blocked_count(ordered)
+            if after_blocked >= before_blocked:
+                raise ValueError(
+                    f"post-analysis order did not improve blocked edges ({before_blocked} → {after_blocked})"
+                )
+            with self.lock:
+                self.state["postAnalysisPlanning"] = "completed"
+                self.state["reason"] = reason
+                self.reorder(ordered)
+        except Exception as error:
+            with self.lock:
+                self.state["postAnalysisPlanning"] = "failed"
+                self.state["error"] = f"post-analysis Meta planning failed: {error}"
                 self._recompute_status()
                 self._persist()

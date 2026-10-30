@@ -306,6 +306,9 @@ function QueuePanel({
   const [count, setCount] = useState(10);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const builder = state.dataSource === "live" ? state.setBuilder : undefined;
+  const builderNotice = builder?.error
+    || (["curating", "analyzing", "planning"].includes(builder?.status ?? "") ? notice : null)
+    || builder?.reason;
   const prepared = Boolean(builder?.queue.length);
   const shownQueue = prepared ? builder!.queue : state.queue;
   const transitions = prepared
@@ -371,9 +374,9 @@ function QueuePanel({
             {builder?.model && <span>{builder.model}</span>}
             {builder?.activationReady && <strong>Ready to activate</strong>}
           </div>
-          {(builder?.reason || builder?.error || notice) && (
+          {builderNotice && (
             <p className={builder?.error ? "set-builder__message is-error" : "set-builder__message"}>
-              {builder?.error || notice || builder?.reason}
+              {builderNotice}
             </p>
           )}
         </div>

@@ -17,7 +17,9 @@ def metadata(path: Path) -> dict:
     }
 
 
-def write_analyzed_library(root: Path, count: int = 5) -> tuple[str, ...]:
+def write_analyzed_library(
+    root: Path, count: int = 5, bpms: tuple[float, ...] | None = None
+) -> tuple[str, ...]:
     library = root / "local-assets/samples"
     analysis_root = root / "artifacts/time-map"
     library.mkdir(parents=True)
@@ -36,7 +38,7 @@ def write_analyzed_library(root: Path, count: int = 5) -> tuple[str, ...]:
                     "analysis_cache_key": f"analysis-{index}",
                     "source_filename": source.name,
                     "duration_seconds": 180,
-                    "rhythm": {"bpm": 124 + index},
+                    "rhythm": {"bpm": bpms[index] if bpms else 124 + index},
                 }
             ),
             encoding="utf-8",
@@ -124,6 +126,34 @@ class SetBuilderTest(unittest.TestCase):
             }
             self.assertEqual(service.queued_jobs, expected_new)
             self.assertEqual(state["queueRevision"], 2)
+
+    def test_post_analysis_meta_order_must_reduce_blocked_edges(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            track_ids = write_analyzed_library(
+                root,
+                bpms=(100, 140, 105, 145, 110),
+            )
+            improved = (track_ids[0], track_ids[2], track_ids[4], track_ids[1], track_ids[3])
+            service = SetBuilderService(
+                root,
+                metadata_reader=metadata,
+                curator=lambda tracks, prompt, count: (track_ids, "initial"),
+                post_curator=lambda tracks, prompt, count: (improved, "measured BPM reorder"),
+                start_worker=False,
+            )
+            service.build("rising house", 5)
+            for edge in service.state["transitions"]:
+                edge["status"] = "blocked"
+            service.state["postAnalysisPlanning"] = "pending"
+
+            service._work_post_plan()
+
+            self.assertEqual(service.state["orderedTrackIds"], list(improved))
+            self.assertEqual(service.state["queueRevision"], 2)
+            self.assertEqual(service.state["postAnalysisPlanning"], "completed")
+            self.assertEqual(service.state["reason"], "measured BPM reorder")
+            self.assertIsNone(service.state["error"])
 
 
 if __name__ == "__main__":

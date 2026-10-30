@@ -28,7 +28,9 @@ separately validated local prototype.
   natural-language set request to Meta, show the chosen local tracks, run
   missing per-track analysis in one background worker, and prepare only the
   adjacent pair caches. Dragging a prepared track preserves unchanged edges
-  and schedules only new adjacencies. Prepared sets remain separate from the
+  and schedules only new adjacencies. Once measured BPM is available, a
+  second bounded Meta pass may reorder the set; local code accepts it only
+  when it reduces blocked adjacencies. Prepared sets remain separate from the
   currently executing Mixxx queue until a safe activation boundary is built.
 - The live bridge exposes separate **Plan with Meta** and **Approve & arm**
   actions. Planning makes one model request, validates the returned candidate

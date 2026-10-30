@@ -153,8 +153,9 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .set-builder__status strong { color: var(--cyan); }
 .builder-state { color: var(--muted); }
 .builder-state--curating, .builder-state--analyzing { color: var(--amber); }
+.builder-state--planning { color: var(--violet); }
 .builder-state--ready { color: var(--cyan); }
-.builder-state--error { color: var(--red); }
+.builder-state--blocked, .builder-state--error { color: var(--red); }
 .set-builder__message { margin: 8px 0 0; color: #b8bac5; font-size: 11px; line-height: 1.45; }
 .set-builder__message.is-error { color: #ff9aa7; }
 .workspace-grid > .event-panel { grid-area: events; margin-top: 0; }

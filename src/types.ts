@@ -110,7 +110,7 @@ export interface CopilotState {
   plan: TransitionPlan;
   events: PerformanceEvent[];
   setBuilder?: {
-    status: "idle" | "curating" | "analyzing" | "ready" | "error";
+    status: "idle" | "curating" | "analyzing" | "planning" | "ready" | "blocked" | "error";
     prompt: string;
     model: string | null;
     reason: string | null;
@@ -121,6 +121,7 @@ export interface CopilotState {
     transitions: TransitionEdge[];
     catalogCount: number;
     activationReady: boolean;
+    postAnalysisPlanning: "idle" | "pending" | "running" | "completed" | "failed";
     updatedAt: string;
   };
 }
