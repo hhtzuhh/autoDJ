@@ -34,3 +34,11 @@ Each edge includes its source and target identities, candidate count, queue
 revision, selection provenance, and an optional reason. `ready` does not mean
 the transition has executed; the plan lifecycle remains authoritative for
 `armed`, `executing`, `completed`, and human takeover states.
+
+For the current A–B–C window, **Plan with Meta** temporarily moves A→B to
+`planning`. Local code first removes candidates whose A exit is no longer in
+the future and whose B entry/dwell/exit ordering cannot preserve a B→C draft.
+A valid single-call model choice moves the edge to `ready` with
+`selectedBy: "meta"`; a request or validation failure returns it to `analyzed`
+with a non-secret reason. The model name, confidence, and reason shown in the
+plan come from the validated selection artifact rather than UI defaults.

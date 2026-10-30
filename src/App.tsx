@@ -466,7 +466,7 @@ function App() {
     });
   };
 
-  const sendLiveAction = async (action: "arm" | "takeover") => {
+  const sendLiveAction = async (action: "plan" | "arm" | "takeover") => {
     setActionPending(true);
     setActionNotice(null);
     try {
@@ -597,8 +597,15 @@ function App() {
               Open simulation
             </button>
             <button
+              className="button button--secondary"
+              disabled={actionPending || state.plan.status === "executing"}
+              onClick={() => void sendLiveAction("plan")}
+            >
+              <Icon name="spark" /> Plan with Meta
+            </button>
+            <button
               className="button button--primary"
-              disabled={actionPending}
+              disabled={actionPending || state.plan.status !== "ready"}
               onClick={() => void sendLiveAction("arm")}
             >
               <Icon name="play" /> Approve & arm

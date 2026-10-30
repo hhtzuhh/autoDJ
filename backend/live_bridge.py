@@ -33,6 +33,13 @@ from transition_pipeline import (  # noqa: E402
     TransitionPipeline,
     VersionedQueue,
 )
+from meta_planner import (  # noqa: E402
+    MetaConfig,
+    OpenAICompatibleTransport,
+    build_rolling_candidates,
+    load_dotenv,
+    select_with_meta,
+)
 
 
 DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
@@ -63,12 +70,14 @@ class LiveStateStore:
         self.error: str | None = None
         self.events: deque[dict[str, Any]] = deque(maxlen=20)
         self.raw_performance: Any | None = None
+        self.current_track_id: str | None = None
         self.supervisor: Any | None = None
+        self.transition_overrides: dict[tuple[str, str], dict[str, Any]] = {}
         self.action_lock = threading.Lock()
         self.queue = load_json(
             workspace / "artifacts/live-performance/queue-state-v1.json"
         )
-        analysis_catalog = AnalysisCatalog.from_root(
+        self.analysis_catalog = AnalysisCatalog.from_root(
             workspace / "artifacts/time-map"
         )
         queue_snapshot = QueueSnapshot(
@@ -76,14 +85,14 @@ class LiveStateStore:
             ordered_track_ids=tuple(self.queue["ordered_track_ids"]),
             updated_at=str(self.queue["updated_at"]),
         )
-        transition_pipeline = TransitionPipeline(
-            VersionedQueue(analysis_catalog, queue_snapshot),
+        self.transition_pipeline = TransitionPipeline(
+            VersionedQueue(self.analysis_catalog, queue_snapshot),
             PairAnalysisCache(
                 workspace / "artifacts/live-performance/dashboard-pairs",
-                analysis_catalog,
+                self.analysis_catalog,
             ),
         )
-        _, self.transition_edges = transition_pipeline.set_queue(
+        _, self.transition_edges = self.transition_pipeline.set_queue(
             queue_snapshot.ordered_track_ids
         )
         self.selection = self._load_selection()
@@ -135,7 +144,7 @@ class LiveStateStore:
             if self.supervisor and self.supervisor.executor is not None:
                 return 409, {"error": "a transition executor is already active"}
 
-            live_selection = deepcopy(self._load_selection())
+            live_selection = deepcopy(self.selection)
             plan = live_selection["next_executable_plan"]
             unique = f"dashboard-{int(time.time() * 1000)}"
             plan["plan_id"] = f"{plan['plan_id']}-{unique}"
@@ -175,6 +184,181 @@ class LiveStateStore:
                 "plan_id": plan["plan_id"],
                 "message": "Plan passed preflight and is waiting for the observer lifecycle update.",
             }
+
+    def request_meta_plan(self) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self.raw_performance is None or self.current_track_id is None:
+                return 503, {"error": "Mixxx performance snapshot is unavailable"}
+            if self.supervisor and self.supervisor.executor is not None:
+                return 409, {"error": "a transition executor is already active"}
+            queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
+            if self.current_track_id not in queue_ids:
+                return 409, {"error": "current_track_is_not_in_queue"}
+            current_index = queue_ids.index(self.current_track_id)
+            if current_index + 2 >= len(queue_ids):
+                return 409, {
+                    "error": "rolling_window_requires_current_next_and_following_tracks"
+                }
+            track_ids = tuple(queue_ids[current_index : current_index + 3])
+            source_id, target_id, following_id = track_ids
+            source_deck = next(
+                (
+                    deck
+                    for deck in self.raw_performance.decks.values()
+                    if deck.track_id == source_id
+                ),
+                None,
+            )
+            if source_deck is None or source_deck.beat_index is None:
+                return 409, {"error": "current_source_deck_is_not_observable"}
+            target_deck_number = 1 if int(source_deck.deck) == 2 else 2
+            immediate = self.transition_pipeline.cache.payload(source_id, target_id)
+            following = self.transition_pipeline.cache.payload(target_id, following_id)
+            candidates = build_rolling_candidates(immediate, following)
+            candidates = [
+                row
+                for row in candidates
+                if int(row["a_exit_beat_index"]) > int(source_deck.beat_index) + 16
+            ]
+            if not candidates:
+                return 409, {"error": "no_future_feasible_abc_candidates"}
+
+            edge_key = (source_id, target_id)
+            self.transition_overrides[edge_key] = {
+                "status": "planning",
+                "selectedBy": None,
+                "reason": None,
+            }
+            load_dotenv(BACKEND_ROOT.parent / ".env")
+            load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+            try:
+                config = MetaConfig.from_environment()
+                selection = select_with_meta(
+                    candidates,
+                    queue_revision=int(self.queue["revision"]),
+                    intent="maintain_energy",
+                    track_ids=track_ids,  # type: ignore[arg-type]
+                    model=config.model,
+                    transport=OpenAICompatibleTransport(config),
+                )
+                compiled = self._compile_meta_selection(
+                    track_ids,
+                    selection.candidate,
+                    selection.decision.to_dict(),
+                    config.model,
+                    int(source_deck.deck),
+                    target_deck_number,
+                )
+            except Exception as error:
+                self.transition_overrides[edge_key] = {
+                    "status": "analyzed",
+                    "selectedBy": None,
+                    "reason": f"meta_planning_failed:{type(error).__name__}",
+                }
+                return 502, {
+                    "error": "meta_planning_failed",
+                    "detail": f"{type(error).__name__}: {error}",
+                }
+
+            self.selection = compiled
+            self.envelope = None
+            self.supervisor = None
+            self.transition_overrides[edge_key] = {
+                "status": "ready",
+                "selectedBy": "meta",
+                "reason": selection.decision.reason,
+            }
+            runtime = self.workspace / "artifacts/live-performance"
+            output = runtime / "dashboard-meta-selection-v1.json"
+            temporary = output.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(compiled, indent=2, ensure_ascii=False, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(output)
+            return 200, {
+                "accepted": True,
+                "status": "ready",
+                "selected_by": "meta",
+                "model": config.model,
+                "candidate_count": selection.candidate_count,
+                "plan_id": compiled["next_executable_plan"]["plan_id"],
+                "message": "Meta selected one locally feasible candidate; local compilation succeeded.",
+            }
+
+    def _compile_meta_selection(
+        self,
+        track_ids: tuple[str, str, str],
+        candidate: dict[str, Any],
+        decision: dict[str, Any],
+        model: str,
+        source_deck: int,
+        target_deck: int,
+    ) -> dict[str, Any]:
+        source_id, target_id, following_id = track_ids
+        source = self.analysis_catalog.tracks[source_id]
+        target = self.analysis_catalog.tracks[target_id]
+        beats = int(candidate["ab_transition_bars"]) * 4
+        transition_start = int(candidate["a_exit_beat_index"])
+        plan_id = f"meta-q{self.queue['revision']}-{candidate['candidate_id']}"
+        plan = {
+            "schema_version": 1,
+            "schema_uri": "schemas/dj-transition-plan-v1.schema.json",
+            "plan_id": plan_id,
+            "source": f"meta_model_api_{model.replace('-', '_').replace('.', '_')}",
+            "source_start_mode": "continue_playing",
+            "completion_mode": "continue_target",
+            "deck_a": {
+                "audio_sha256": source_id,
+                "analysis_cache_key": source.analysis_cache_key,
+                "analysis_filename": "track-analysis-v1.json",
+                "deck": source_deck,
+                "play_start_beat_index": max(0, transition_start - 8),
+                "transition_start_beat_index": transition_start,
+                "transition_end_beat_index": transition_start + beats,
+            },
+            "deck_b": {
+                "audio_sha256": target_id,
+                "analysis_cache_key": target.analysis_cache_key,
+                "analysis_filename": "track-analysis-v1.json",
+                "deck": target_deck,
+                "cue_beat_index": int(candidate["b_entry_beat_index"]),
+            },
+            "mix": {
+                "bars": int(candidate["ab_transition_bars"]),
+                "beats": beats,
+                "beats_per_bar": 4,
+                "crossfader_curve": "linear",
+                "steps": 33,
+                "tail_beats": beats,
+                "tempo_source": "deck_a_sync_leader",
+            },
+        }
+        if bool(decision["use_bass_swap"]):
+            plan["mix"]["bass_swap"] = {
+                "start_beat": beats // 4,
+                "end_beat": beats * 3 // 4,
+            }
+        return {
+            "schema_version": 1,
+            "selection": "meta_model_api_single_call",
+            "source_window_id": f"dashboard-q{self.queue['revision']}-{candidate['candidate_id']}",
+            "queue_revision": int(self.queue["revision"]),
+            "intent": decision["intent"],
+            "model": model,
+            "model_decision": decision,
+            "selected_candidate": candidate,
+            "next_executable_plan": plan,
+            "following_feasible_draft": {
+                "status": "feasible_not_armed",
+                "source_track_id": target_id,
+                "target_track_id": following_id,
+                "source_exit_beat_index": int(candidate["b_exit_beat_index"]),
+                "target_entry_beat_index": int(candidate["c_entry_beat_index"]),
+                "transition_bars": int(candidate["bc_transition_bars"]),
+            },
+        }
 
     def request_takeover(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
@@ -241,13 +425,17 @@ class LiveStateStore:
         loaded_ids = {
             deck.track_id for deck in performance.decks.values() if deck.track_id
         }
-        current_id = next(iter(playing_ids), None)
+        current_id = next(
+            (track_id for track_id in queue_ids if track_id in playing_ids),
+            None,
+        )
         if current_id is None:
             current_id = next(
                 (track_id for track_id in reversed(queue_ids) if track_id in loaded_ids),
                 queue_ids[0] if queue_ids else None,
             )
         current_index = queue_ids.index(current_id) if current_id in queue_ids else 0
+        self.current_track_id = current_id
 
         queue = []
         for index, track_id in enumerate(queue_ids):
@@ -284,7 +472,11 @@ class LiveStateStore:
 
         plan_payload = self.selection["next_executable_plan"]
         context = self.selection.get("replan_context", {})
-        candidate = context.get("selected_candidate", {})
+        candidate = self.selection.get(
+            "selected_candidate",
+            context.get("selected_candidate", {}),
+        )
+        model_decision = self.selection.get("model_decision", {})
         selection_name = str(self.selection.get("selection", ""))
         plan_status = "ready"
         invalidation_reason = None
@@ -297,7 +489,9 @@ class LiveStateStore:
             if "meta" in source or "meta" in selection_name
             else "deterministic_fallback"
         )
-        confidence = float(candidate.get("intent_score", 0.0))
+        confidence = float(
+            model_decision.get("confidence", candidate.get("intent_score", 0.0))
+        )
         if confidence <= 0:
             confidence = 0.75
 
@@ -311,13 +505,16 @@ class LiveStateStore:
             "bars": int(plan_payload["mix"]["bars"]),
             "intent": str(self.selection.get("intent", "maintain_energy")).replace("_", " ").title(),
             "confidence": min(1.0, max(0.0, confidence)),
-            "reason": (
-                "A bounded local recovery selected the next future analyzed downbeat."
-                if selected_by == "deterministic_fallback"
-                else "Meta selected this candidate from the locally constrained window."
+            "reason": str(
+                model_decision.get("reason")
+                or (
+                    "A bounded local recovery selected the next future analyzed downbeat."
+                    if selected_by == "deterministic_fallback"
+                    else "Meta selected this candidate from the locally constrained window."
+                )
             ),
             "selectedBy": selected_by,
-            "model": "muse-spark-1.3" if selected_by == "meta" else None,
+            "model": self.selection.get("model") if selected_by == "meta" else None,
             "queueRevision": int(self.queue["revision"]),
             "performanceRevision": int(performance.revision),
             "invalidationReason": invalidation_reason,
@@ -326,6 +523,11 @@ class LiveStateStore:
         transitions = []
         for edge in self.transition_edges:
             payload = edge.to_dict()
+            override = self.transition_overrides.get(
+                (edge.source_track_id, edge.target_track_id)
+            )
+            if override:
+                payload.update(override)
             if (
                 edge.source_track_id == plan["sourceTrackId"]
                 and edge.target_track_id == plan["targetTrackId"]
@@ -408,6 +610,10 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/api/plan":
+                status, payload = store.request_meta_plan()
+                self._json(status, payload)
+                return
             if self.path == "/api/arm":
                 status, payload = store.request_arm()
                 self._json(status, payload)

@@ -12,15 +12,19 @@ separately validated local prototype.
 ## Current status
 
 - Implemented here: responsive React/TypeScript control-room UI, typed state
-  contract, queue/Deck/plan/event views, and an interactive simulation of cue
-  expiry, uninterrupted replanning, arming, and human takeover.
+  contract, queue/Deck/plan/event views, deterministic adjacent-pair analysis,
+  and bounded Meta selection for the current A–B–C window.
 - Development bridge implemented: the verified private-workspace Mixxx
   observer can now feed real Deck identity, play state, beat, position, sync,
   queue revision, plan provenance, and events into the dashboard. This bridge
   still depends on the sibling experimental workspace and is not yet the
   standalone public observer implementation.
-- Not connected here yet: live Meta Model API request, write controls into the
-  local audio executor, and redistributable audio fixtures.
+- The live bridge exposes separate **Plan with Meta** and **Approve & arm**
+  actions. Planning makes one model request, validates the returned candidate
+  locally, and never writes to Mixxx. Arming remains a distinct human action
+  behind the existing lifecycle preflight and executor.
+- Not included here yet: a standalone public Mixxx observer/executor and
+  redistributable audio fixtures.
 - The UI labels simulation data explicitly. It does not present fixture events
   as live model or audio-engine behavior.
 
@@ -77,6 +81,27 @@ signal and exited successfully. Seven seconds later both Decks were still
 playing, their leader/follower sync roles were unchanged, and the crossfader
 remained at its handoff position. No stop or cleanup command followed.
 
+### Meta configuration
+
+Copy `.env.example` to `.env` and set `MODEL_API_KEY`. The model, compatible
+API base URL, and timeout are configured with `META_MODEL`, `META_API_BASE`,
+and `META_TIMEOUT_SECONDS`; no model name or credential is embedded in the
+planner.
+
+The planner sends at most ten locally feasible candidates in exactly one Meta
+Model API call. The response may select a candidate and request the supported
+bass-swap template, but it cannot introduce track IDs, beat positions, or
+transition lengths. Unknown candidates, malformed output, expired exits, and
+incomplete A–B–C windows fail closed before the arm boundary.
+
+A real `muse-spark-1.3` acceptance call on 2026-10-30 selected one of ten
+Boots → Bass → Boomerang candidates and passed strict local validation. The
+live endpoint was also tested against the then-current Mixxx state: it returned
+HTTP 409 because the current queue position did not have both a next and a
+following track. That rejection caused no Mixxx write and is the expected
+rolling-window behavior; a live Meta-selected plan has not yet been armed from
+this dashboard.
+
 For a production build:
 
 ```bash
@@ -99,8 +124,10 @@ python -m unittest discover -s backend -p 'test_*.py' -v
 
 The tests verify that a ten-track queue creates nine directional pair analyses,
 reordering builds only new adjacent edges, caches are reused, incompatible
-tempo is blocked, and queues longer than ten tracks remain supported. Meta
-selection for the current A–B–C window is the next integration milestone.
+tempo is blocked, and queues longer than ten tracks remain supported. They
+also verify bounded, temporally feasible A–B–C construction, strict Meta output
+validation, exactly one model call, and compilation into the executor plan
+shape.
 
 ## Demo interaction
 

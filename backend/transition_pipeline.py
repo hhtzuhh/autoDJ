@@ -271,6 +271,11 @@ class PairAnalysisCache:
             False,
         )
 
+    def payload(self, source_track_id: str, target_track_id: str) -> dict[str, Any]:
+        result = self.ensure(source_track_id, target_track_id)
+        cache_path = self.root / f"{result.cache_key}.json"
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+
 
 class TransitionPipeline:
     def __init__(self, queue: VersionedQueue, cache: PairAnalysisCache) -> None:
