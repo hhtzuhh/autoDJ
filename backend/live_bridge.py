@@ -41,6 +41,12 @@ from meta_planner import (  # noqa: E402
     select_with_meta,
 )
 from set_builder import SetBuilderService  # noqa: E402
+from clean_break import compile_clean_break_plan, select_clean_break_with_meta  # noqa: E402
+from set_activation import (  # noqa: E402
+    load_prepared_activation,
+    prepare_activation,
+    promote_prepared_activation,
+)
 
 
 DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
@@ -86,10 +92,11 @@ class LiveStateStore:
         self.current_track_id: str | None = None
         self.supervisor: Any | None = None
         self.transition_overrides: dict[tuple[str, str], dict[str, Any]] = {}
-        self.action_lock = threading.Lock()
+        self.action_lock = threading.RLock()
         self.auto_chain_cancel = threading.Event()
         self.auto_chain_thread: threading.Thread | None = None
         self.auto_chain_started_for: set[str] = set()
+        self.activation_in_progress = False
         self.queue = load_json(
             workspace / "artifacts/live-performance/queue-state-v1.json"
         )
@@ -170,16 +177,45 @@ class LiveStateStore:
         with self.lock:
             self.error = message
 
+    def _executor_running(self) -> bool:
+        executor = self.supervisor.executor if self.supervisor else None
+        return executor is not None and executor.poll() is None
+
     def snapshot(self) -> tuple[dict[str, Any] | None, str | None]:
         with self.lock:
             state = deepcopy(self.state) if self.state is not None else None
             error = self.error
         if state is not None:
             state["setBuilder"] = self.set_builder.snapshot()
+            state["setBuilder"]["activation"] = self._activation_snapshot()
         return state, error
 
+    def _activation_snapshot(self) -> dict[str, Any] | None:
+        path = self.workspace / "artifacts/live-performance/prepared-activation-v1.json"
+        if not path.exists():
+            return None
+        try:
+            payload = load_prepared_activation(path)
+            queue = payload["queue"]
+            builder = self.set_builder.snapshot()
+            if (
+                builder.get("status") != "ready"
+                or not builder.get("activationReady")
+                or [str(value) for value in builder.get("orderedTrackIds", [])]
+                != [str(value) for value in queue["ordered_track_ids"]]
+            ):
+                return None
+            return {
+                "status": payload["status"],
+                "queueRevision": int(queue["revision"]),
+                "trackCount": len(queue["ordered_track_ids"]),
+                "playlist": str(payload["playlist_path"]),
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
     def request_set_build(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        if self.supervisor and self.supervisor.executor is not None:
+        if self._executor_running():
             return 409, {"error": "cannot replace the prepared set while a transition executes"}
         try:
             prompt = str(payload.get("prompt", ""))
@@ -191,7 +227,7 @@ class LiveStateStore:
             return 502, {"error": str(error)}
 
     def request_queue_reorder(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        if self.supervisor and self.supervisor.executor is not None:
+        if self._executor_running():
             return 409, {"error": "queue is locked while a transition executes"}
         try:
             ordered = payload.get("orderedTrackIds")
@@ -201,11 +237,215 @@ class LiveStateStore:
         except (TypeError, ValueError) as error:
             return 400, {"error": str(error)}
 
+    def request_activate_set(self) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self._executor_running():
+                return 409, {"error": "cannot activate a set while a transition executes"}
+            if self.raw_performance and any(
+                deck.play is True for deck in self.raw_performance.decks.values()
+            ):
+                return 409, {"error": "stop both Decks before preparing a new live set"}
+            try:
+                prepared = prepare_activation(
+                    self.workspace,
+                    self.set_builder.snapshot(),
+                    active_queue_revision=int(self.queue["revision"]),
+                )
+            except ValueError as error:
+                return 409, {"error": str(error)}
+            self._append_system_event(
+                "Mixxx set prepared",
+                "Hash-verified playlist written. Open it in Mixxx and select the first row before Start set.",
+            )
+            return 200, prepared.public()
+
+    def _wait_for_loaded_track(
+        self,
+        deck_number: int,
+        expected_id: str,
+        previous_id: str | None,
+        *,
+        timeout: float = 4.0,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        saw_change = False
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            with self.lock:
+                performance = self.raw_performance
+            if performance is None:
+                continue
+            observed_id = performance.decks[deck_number].track_id
+            if observed_id == expected_id:
+                return True
+            if observed_id is None or observed_id != previous_id:
+                saw_change = True
+            if saw_change and observed_id not in (None, expected_id):
+                return False
+        return False
+
+    def _install_active_queue(self, queue: dict[str, Any]) -> None:
+        self.queue = queue
+        self.set_list_manifest_path = (
+            self.workspace / "artifacts/live-performance/tonight-set-list-v1.json"
+        )
+        self.analysis_catalog = AnalysisCatalog.from_root(
+            self.workspace / "artifacts/time-map"
+        )
+        snapshot = QueueSnapshot(
+            revision=int(queue["revision"]),
+            ordered_track_ids=tuple(str(value) for value in queue["ordered_track_ids"]),
+            updated_at=str(queue["updated_at"]),
+        )
+        self.transition_pipeline = TransitionPipeline(
+            VersionedQueue(self.analysis_catalog, snapshot),
+            PairAnalysisCache(
+                self.workspace / "artifacts/live-performance/dashboard-pairs",
+                self.analysis_catalog,
+            ),
+        )
+        _, self.transition_edges = self.transition_pipeline.set_queue(
+            snapshot.ordered_track_ids
+        )
+        self.catalog = self._load_catalog()
+        self.transition_overrides.clear()
+        self.supervisor = None
+        self.envelope = None
+        self.auto_chain_started_for.clear()
+
+    def request_start_set(self) -> tuple[int, dict[str, Any]]:
+        """Verify the first two selected playlist rows, then start Deck 1."""
+        with self.action_lock:
+            if self._executor_running():
+                return 409, {"error": "cannot start a set while a transition executes"}
+            if self.raw_performance is None:
+                return 503, {"error": "Mixxx performance snapshot is unavailable"}
+            if any(deck.play is True for deck in self.raw_performance.decks.values()):
+                return 409, {"error": "stop both Decks before starting a prepared set"}
+            activation_path = (
+                self.workspace / "artifacts/live-performance/prepared-activation-v1.json"
+            )
+            if not activation_path.exists():
+                return 409, {"error": "prepare the Mixxx set before starting it"}
+            try:
+                activation = load_prepared_activation(activation_path)
+                builder = self.set_builder.snapshot()
+                if (
+                    builder.get("status") != "ready"
+                    or not builder.get("activationReady")
+                    or [str(value) for value in builder.get("orderedTrackIds", [])]
+                    != [
+                        str(value)
+                        for value in activation["queue"]["ordered_track_ids"]
+                    ]
+                ):
+                    return 409, {
+                        "error": "prepared_playlist_is_stale",
+                        "message": "Prepare Mixxx set again after the latest queue change.",
+                    }
+                first_id, second_id = [
+                    str(value) for value in activation["queue"]["ordered_track_ids"][:2]
+                ]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                return 409, {"error": f"invalid prepared set: {error}"}
+
+            mixxx_root = self.workspace / "experiments/mixxx-control"
+            if str(mixxx_root) not in sys.path:
+                sys.path.insert(0, str(mixxx_root))
+            try:
+                import mido
+                from probe import (
+                    port_name,
+                    send_library_value,
+                    send_load_value,
+                    send_sync_value,
+                    send_value,
+                )
+
+                previous_1 = self.raw_performance.decks[1].track_id
+                with mido.open_output(port_name()) as output:
+                    send_load_value(output, 1)
+                if not self._wait_for_loaded_track(1, first_id, previous_1):
+                    return 409, {
+                        "error": "selected_mixxx_row_is_not_the_first_prepared_track",
+                        "message": "Open the generated playlist and select its first row; nothing was played.",
+                    }
+
+                with mido.open_output(port_name()) as output:
+                    send_library_value(output, "next")
+                    time.sleep(0.2)
+                    previous_2 = self.raw_performance.decks[2].track_id
+                    send_load_value(output, 2)
+                if not self._wait_for_loaded_track(2, second_id, previous_2):
+                    return 409, {
+                        "error": "mixxx_second_row_does_not_match_prepared_queue",
+                        "message": "The loaded tracks were left stopped; the active queue was not changed.",
+                    }
+
+                previous_queue = deepcopy(self.queue)
+                previous_current_id = self.current_track_id
+                previous_selection = deepcopy(self.selection)
+                previous_supervisor = self.supervisor
+                previous_envelope = deepcopy(self.envelope)
+                previous_overrides = deepcopy(self.transition_overrides)
+                self.activation_in_progress = True
+                try:
+                    self._install_active_queue(activation["queue"])
+                    self.current_track_id = first_id
+                    plan_status, plan_payload = self.request_meta_plan()
+                    if plan_status != 200:
+                        self._install_active_queue(previous_queue)
+                        self.current_track_id = previous_current_id
+                        self.selection = previous_selection
+                        self.supervisor = previous_supervisor
+                        self.envelope = previous_envelope
+                        self.transition_overrides = previous_overrides
+                        self._write_dashboard_selection(previous_selection)
+                        return 409, {
+                            "error": "first_transition_planning_failed",
+                            "detail": plan_payload.get("error"),
+                            "message": "The loaded tracks remain stopped and the active queue was not changed.",
+                        }
+                    queue = promote_prepared_activation(self.workspace, activation)
+                except Exception:
+                    self._install_active_queue(previous_queue)
+                    self.current_track_id = previous_current_id
+                    self.selection = previous_selection
+                    self.supervisor = previous_supervisor
+                    self.envelope = previous_envelope
+                    self.transition_overrides = previous_overrides
+                    self._write_dashboard_selection(previous_selection)
+                    raise
+                finally:
+                    self.activation_in_progress = False
+                with mido.open_output(port_name()) as output:
+                    for deck_number in (1, 2):
+                        send_sync_value(output, deck_number, "enabled", False)
+                        send_value(output, str(deck_number), "rate", 0.0)
+                        send_value(output, str(deck_number), "volume", 0.75)
+                    send_value(output, "master", "crossfader", 0.0)
+                    send_value(output, "1", "play", 1.0)
+            except Exception as error:
+                return 502, {
+                    "error": "mixxx_set_start_failed",
+                    "detail": f"{type(error).__name__}: {error}",
+                }
+            self._append_system_event(
+                "Prepared set started",
+                "Deck identities matched the prepared queue. Deck 1 is playing; the first Meta plan still requires Approve & arm.",
+            )
+            return 202, {
+                "accepted": True,
+                "queueRevision": int(queue["revision"]),
+                "plan_id": plan_payload["plan_id"],
+                "message": "Set started. Review the first Meta plan, then Approve & arm.",
+            }
+
     def request_arm(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
             if self.raw_performance is None:
                 return 503, {"error": "Mixxx performance snapshot is unavailable"}
-            if self.supervisor and self.supervisor.executor is not None:
+            if self._executor_running():
                 return 409, {"error": "a transition executor is already active"}
 
             live_selection = deepcopy(self.selection)
@@ -253,7 +493,7 @@ class LiveStateStore:
         with self.action_lock:
             if self.raw_performance is None or self.current_track_id is None:
                 return 503, {"error": "Mixxx performance snapshot is unavailable"}
-            if self.supervisor and self.supervisor.executor is not None:
+            if self._executor_running():
                 return 409, {"error": "a transition executor is already active"}
             queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
             if self.current_track_id not in queue_ids:
@@ -261,19 +501,26 @@ class LiveStateStore:
             current_index = queue_ids.index(self.current_track_id)
             if current_index + 1 >= len(queue_ids):
                 return 409, {"error": "queue_has_no_next_track"}
-            if current_index + 2 >= len(queue_ids):
-                return self._promote_following_draft(
-                    queue_ids[current_index],
-                    queue_ids[current_index + 1],
-                )
-            track_ids = tuple(queue_ids[current_index : current_index + 3])
-            source_id, target_id, following_id = track_ids
+            source_id, target_id = queue_ids[current_index : current_index + 2]
             source_match = find_track_deck(self.raw_performance, source_id)
             if source_match is None or source_match[1].beat_index is None:
                 return 409, {"error": "current_source_deck_is_not_observable"}
             source_deck_number, source_deck = source_match
             target_deck_number = 1 if source_deck_number == 2 else 2
             immediate = self.transition_pipeline.cache.payload(source_id, target_id)
+            if not immediate.get("pairs") and immediate.get("clean_break_pairs"):
+                return self._plan_clean_break(
+                    source_id,
+                    target_id,
+                    source_deck_number,
+                    target_deck_number,
+                    int(source_deck.beat_index),
+                    immediate["clean_break_pairs"],
+                )
+            if current_index + 2 >= len(queue_ids):
+                return self._promote_following_draft(source_id, target_id)
+            following_id = queue_ids[current_index + 2]
+            track_ids = (source_id, target_id, following_id)
             following = self.transition_pipeline.cache.payload(target_id, following_id)
             candidates = build_rolling_candidates(immediate, following)
             candidates = [
@@ -340,6 +587,79 @@ class LiveStateStore:
                 "plan_id": compiled["next_executable_plan"]["plan_id"],
                 "message": "Meta selected one locally feasible candidate; local compilation succeeded.",
             }
+
+    def _plan_clean_break(
+        self,
+        source_id: str,
+        target_id: str,
+        source_deck: int,
+        target_deck: int,
+        live_beat: int,
+        candidates: list[dict[str, Any]],
+    ) -> tuple[int, dict[str, Any]]:
+        future = [
+            candidate
+            for candidate in candidates
+            if int(candidate["a_exit"]["beat_index"]) > live_beat + 16
+        ]
+        if not future:
+            return 409, {"error": "no_future_clean_break_candidate"}
+        load_dotenv(BACKEND_ROOT.parent / ".env")
+        load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+        try:
+            config = MetaConfig.from_environment()
+            pair, confidence, reason = select_clean_break_with_meta(
+                future,
+                queue_revision=int(self.queue["revision"]),
+                source_id=source_id,
+                target_id=target_id,
+                transport=OpenAICompatibleTransport(config),
+            )
+            plan = compile_clean_break_plan(
+                source_id=source_id,
+                target_id=target_id,
+                pair=pair,
+                catalog=self.analysis_catalog,
+                queue_revision=int(self.queue["revision"]),
+                source_deck=source_deck,
+                target_deck=target_deck,
+                model=config.model,
+            )
+        except Exception as error:
+            return 502, {"error": "clean_break_planning_failed", "detail": str(error)}
+        compiled = {
+            "schema_version": 1,
+            "selection": "meta_clean_break_single_call",
+            "source_window_id": f"clean-q{self.queue['revision']}-{source_id[:8]}-{target_id[:8]}",
+            "queue_revision": int(self.queue["revision"]),
+            "intent": "clean_break",
+            "model": config.model,
+            "model_decision": {
+                "confidence": confidence,
+                "reason": reason,
+                "use_bass_swap": False,
+            },
+            "selected_candidate": pair,
+            "next_executable_plan": plan,
+        }
+        self.selection = compiled
+        self.envelope = None
+        self.supervisor = None
+        self.transition_overrides[(source_id, target_id)] = {
+            "status": "ready",
+            "selectedBy": "meta",
+            "reason": reason,
+        }
+        self._write_dashboard_selection(compiled)
+        return 200, {
+            "accepted": True,
+            "status": "ready",
+            "selected_by": "meta",
+            "model": config.model,
+            "candidate_count": min(10, len(future)),
+            "plan_id": plan["plan_id"],
+            "message": "Meta selected a clean-break candidate; native tempos remain unchanged.",
+        }
 
     def _promote_following_draft(
         self,
@@ -634,11 +954,19 @@ class LiveStateStore:
         if completed_plan_id in self.auto_chain_started_for:
             return
         draft = self.selection.get("following_feasible_draft")
-        if not isinstance(draft, dict) or draft.get("status") != "feasible_not_armed":
-            return
         plan = self.selection["next_executable_plan"]
-        source_id = str(draft["source_track_id"])
-        target_id = str(draft["target_track_id"])
+        if isinstance(draft, dict) and draft.get("status") == "feasible_not_armed":
+            source_id = str(draft["source_track_id"])
+            target_id = str(draft["target_track_id"])
+        else:
+            source_id = str(plan["deck_b"]["audio_sha256"])
+            queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
+            if source_id not in queue_ids:
+                return
+            source_index = queue_ids.index(source_id)
+            if source_index + 1 >= len(queue_ids):
+                return
+            target_id = queue_ids[source_index + 1]
         recycled_deck = int(plan["deck_a"]["deck"])
         self.auto_chain_started_for.add(completed_plan_id)
         self.auto_chain_cancel.clear()
@@ -828,6 +1156,11 @@ class LiveStateStore:
         for observed in observed_events:
             self.events.appendleft(self._event(observed))
 
+        if self.activation_in_progress:
+            with self.lock:
+                self.raw_performance = performance
+            return
+
         queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
         playing_ids = {
             deck.track_id
@@ -893,6 +1226,9 @@ class LiveStateStore:
             )
 
         plan_payload = self.selection["next_executable_plan"]
+        transition_mode = str(
+            plan_payload.get("transition_mode", "beat_sync_crossfade")
+        )
         source_analysis = self.catalog[plan_payload["deck_a"]["audio_sha256"]]
         source_beats = source_analysis["rhythm"]["beats_seconds"]
         source_duration = float(source_analysis["duration_seconds"])
@@ -927,6 +1263,12 @@ class LiveStateStore:
         if confidence <= 0:
             confidence = 0.75
 
+        transition_end_beat = int(
+            plan_payload["deck_a"].get(
+                "transition_end_beat_index",
+                plan_payload["deck_a"]["transition_start_beat_index"],
+            )
+        )
         plan = {
             "id": plan_payload["plan_id"],
             "status": plan_status,
@@ -941,7 +1283,7 @@ class LiveStateStore:
                 int(plan_payload["deck_a"]["transition_start_beat_index"])
             ),
             "sourceMixEndPosition": beat_progress(
-                int(plan_payload["deck_a"]["transition_end_beat_index"])
+                transition_end_beat
             ),
             "targetEntryBeat": int(plan_payload["deck_b"]["cue_beat_index"]),
             "targetEntryPosition": min(
@@ -952,7 +1294,8 @@ class LiveStateStore:
                     / target_duration,
                 ),
             ),
-            "bars": int(plan_payload["mix"]["bars"]),
+            "bars": int(plan_payload["mix"].get("bars", 0)),
+            "transitionMode": transition_mode,
             "intent": str(self.selection.get("intent", "maintain_energy")).replace("_", " ").title(),
             "confidence": min(1.0, max(0.0, confidence)),
             "reason": str(
@@ -1094,6 +1437,14 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/set-builder/build":
                 status, response = store.request_set_build(payload)
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/activate":
+                status, response = store.request_activate_set()
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/start":
+                status, response = store.request_start_set()
                 self._json(status, response)
                 return
             if self.path == "/api/queue/reorder":

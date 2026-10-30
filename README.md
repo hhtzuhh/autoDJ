@@ -31,10 +31,17 @@ separately validated local prototype.
   and schedules only new adjacencies. Once measured BPM is available, a
   second bounded Meta pass may reorder the set; local code accepts it only
   when it reduces difficult adjacencies. Large BPM gaps produce explicit
-  `clean_break` candidates instead of being discarded. Those candidates make
-  preparation analysis ready, but are kept out of the existing beat-sync
-  planner until a clean-break executor is implemented. Prepared sets remain separate from the
-  currently executing Mixxx queue until a safe activation boundary is built.
+  `clean_break` candidates instead of being discarded. A separate Meta
+  selector and native-tempo executor compile them into a target-start →
+  fader-cut → source-stop handoff; they never enter the beat-sync crossfade
+  compiler.
+- Safe set activation is split into two explicit stages. **Prepare Mixxx set**
+  writes a hash-verified playlist without mutating the active queue. After the
+  operator opens it and selects its first row, **Start set** requires both
+  Decks stopped, verifies the first two full audio identities, obtains the
+  first Meta plan, atomically promotes the queue, and starts Deck 1. The plan
+  remains unarmed until **Approve & arm**. This path has automated coverage but
+  has not yet completed a live ten-track Mixxx acceptance run.
 - The live bridge exposes separate **Plan with Meta** and **Approve & arm**
   actions. Planning makes one model request, validates the returned candidate
   locally, and never writes to Mixxx. Arming remains a distinct human action
@@ -69,8 +76,8 @@ python3 submission/backend/setlist_service.py \
   --manifest artifacts/live-performance/tonight-set-list-v1.json
 ```
 
-Open the generated playlist in Mixxx and leave its selection on the loaded B
-row. Then, with the Mixxx MIDI mapping installed:
+Open the generated playlist in Mixxx and leave its selection on the row that
+the current queue loader expects. Then, with the Mixxx MIDI mapping installed:
 
 ```bash
 experiments/mixxx-control/.venv/bin/python \
@@ -87,8 +94,10 @@ The Queue panel now also exposes the development set builder. Its catalog is
 bounded to `local-assets/samples` by default; audio paths and source files are
 never returned to the browser. **Build with Meta** makes one strict curation
 call for membership and order, then reports track and edge analysis status as
-the local worker progresses. This preparation flow does not automatically
-replace tonight's Mixxx playlist or arm a transition.
+the local worker progresses. Once every edge is ready, select **Prepare Mixxx
+set**, open the generated playlist, and select its first row. **Start set**
+verifies the first two rows before changing the active queue or playing Deck
+1. It plans but does not arm the first transition.
 
 Observed Deck state is never overwritten directly. The Arm action never sends
 MIDI directly: it first creates a unique plan instance and delegates identity,

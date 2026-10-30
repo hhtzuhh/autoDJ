@@ -215,7 +215,7 @@ class SetBuilderTest(unittest.TestCase):
             state = service.snapshot()
             self.assertEqual(state["status"], "ready")
             self.assertTrue(state["preparationReady"])
-            self.assertFalse(state["activationReady"])
+            self.assertTrue(state["activationReady"])
             self.assertEqual({track["analysisStatus"] for track in state["queue"]}, {"ready"})
             self.assertEqual(len(state["transitions"]), 3)
             self.assertTrue(all(edge["status"] == "analyzed" for edge in state["transitions"]))

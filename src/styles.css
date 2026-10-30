@@ -158,6 +158,8 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .builder-state--blocked, .builder-state--error { color: var(--red); }
 .set-builder__message { margin: 8px 0 0; color: #b8bac5; font-size: 11px; line-height: 1.45; }
 .set-builder__message.is-error { color: #ff9aa7; }
+.set-builder__actions { display: flex; gap: 8px; margin-top: 10px; }
+.set-builder__actions .button { min-height: 34px; padding: 0 12px; }
 .workspace-grid > .event-panel { grid-area: events; margin-top: 0; }
 .panel { padding: 22px; }
 .panel__header { justify-content: space-between; margin-bottom: 20px; }

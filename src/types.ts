@@ -80,6 +80,7 @@ export interface TransitionPlan {
   targetEntryBeat: number;
   targetEntryPosition: number;
   bars: number;
+  transitionMode?: "beat_sync_crossfade" | "clean_break";
   intent: string;
   confidence: number;
   reason: string;
@@ -124,5 +125,11 @@ export interface CopilotState {
     preparationReady: boolean;
     postAnalysisPlanning: "idle" | "pending" | "running" | "completed" | "failed";
     updatedAt: string;
+    activation?: {
+      status: "playlist_ready";
+      queueRevision: number;
+      trackCount: number;
+      playlist: string;
+    } | null;
   };
 }

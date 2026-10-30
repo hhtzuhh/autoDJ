@@ -237,7 +237,11 @@ function PlanPanel({ state }: { state: CopilotState }) {
       <div className="plan-route">
         <TrackMini track={source} />
         <div className="plan-route__bridge">
-          <span>{state.plan.bars} bars</span>
+          <span>
+            {state.plan.transitionMode === "clean_break"
+              ? "Clean break"
+              : `${state.plan.bars} bars`}
+          </span>
           <div><i /><i /><i /><i /></div>
         </div>
         <TrackMini track={target} />
@@ -249,10 +253,11 @@ function PlanPanel({ state }: { state: CopilotState }) {
           <strong>Beat {state.plan.sourceCueBeat}</strong>
         </div>
         <div>
-          <span>Mix window</span>
+          <span>{state.plan.transitionMode === "clean_break" ? "Handoff" : "Mix window"}</span>
           <strong>
-            Beat {state.plan.sourceExitBeat}–
-            {state.plan.sourceExitBeat + state.plan.bars * 4}
+            {state.plan.transitionMode === "clean_break"
+              ? `Cut at beat ${state.plan.sourceExitBeat}`
+              : `Beat ${state.plan.sourceExitBeat}–${state.plan.sourceExitBeat + state.plan.bars * 4}`}
           </strong>
         </div>
         <div>
@@ -295,12 +300,16 @@ function QueuePanel({
   notice,
   onBuild,
   onReorder,
+  onActivate,
+  onStart,
 }: {
   state: CopilotState;
   disabled: boolean;
   notice: string | null;
   onBuild: (prompt: string, count: number) => Promise<void>;
   onReorder: (trackIds: string[]) => Promise<void>;
+  onActivate: () => Promise<void>;
+  onStart: () => Promise<void>;
 }) {
   const [prompt, setPrompt] = useState("今天幫我排 10 首 house，能量慢慢往上");
   const [count, setCount] = useState(10);
@@ -376,6 +385,22 @@ function QueuePanel({
             {builder?.preparationReady && !builder.activationReady && (
               <strong>Analysis ready · executor pending</strong>
             )}
+          </div>
+          <div className="set-builder__actions">
+            <button
+              className="button button--secondary"
+              disabled={disabled || !builder?.activationReady}
+              onClick={() => void onActivate()}
+            >
+              Prepare Mixxx set
+            </button>
+            <button
+              className="button button--primary"
+              disabled={disabled || builder?.activation?.status !== "playlist_ready"}
+              onClick={() => void onStart()}
+            >
+              <Icon name="play" /> Start set
+            </button>
           </div>
           {builderNotice && (
             <p className={builder?.error ? "set-builder__message is-error" : "set-builder__message"}>
@@ -755,6 +780,28 @@ function App() {
     }
   };
 
+  const sendSetAction = async (action: "activate" | "start") => {
+    setActionPending(true);
+    setActionNotice(null);
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:8765/api/set-builder/${action}`,
+        { method: "POST" },
+      );
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.message ?? payload.error ?? `Bridge returned ${response.status}`);
+      setActionNotice(
+        action === "activate" && payload.playlist
+          ? `${payload.message} Playlist: ${payload.playlist}`
+          : payload.message ?? `${action} accepted`,
+      );
+    } catch (error) {
+      setActionNotice(`Rejected: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setActionPending(false);
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -806,6 +853,8 @@ function App() {
             notice={actionNotice}
             onBuild={buildSet}
             onReorder={reorderSet}
+            onActivate={() => sendSetAction("activate")}
+            onStart={() => sendSetAction("start")}
           />
           <EventLog events={state.events} />
         </div>

@@ -431,7 +431,7 @@ class SetBuilderService:
         )
         preparation_ready = tracks_ready and edges_ready and post_plan_ready
         self.state["preparationReady"] = preparation_ready
-        self.state["activationReady"] = preparation_ready and not needs_post_plan
+        self.state["activationReady"] = preparation_ready
         if self.state.get("error"):
             self.state["status"] = "error"
         elif self.state["preparationReady"]:
