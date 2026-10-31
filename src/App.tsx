@@ -216,6 +216,42 @@ function PlanPanel({ state }: { state: CopilotState }) {
   const source = state.queue.find((track) => track.id === state.plan.sourceTrackId)!;
   const target = state.queue.find((track) => track.id === state.plan.targetTrackId)!;
   const isFixture = state.plan.selectedBy === "fixture";
+  const sourceIndex = state.queue.findIndex(
+    (track) => track.id === state.plan.sourceTrackId,
+  );
+  const planningMode = state.plan.planningMode
+    ?? (state.plan.transitionMode === "clean_break"
+      ? "pair_clean_break"
+      : "rolling_abc");
+  const inferredWindowIds = ["rolling_abc", "rolling_abcd"].includes(planningMode) && sourceIndex >= 0
+    ? state.queue.slice(sourceIndex, sourceIndex + (planningMode === "rolling_abcd" ? 4 : 3)).map((track) => track.id)
+    : [state.plan.sourceTrackId, state.plan.targetTrackId];
+  const planningWindow = (state.plan.planningWindowTrackIds ?? inferredWindowIds)
+    .map((trackId) => state.queue.find((track) => track.id === trackId))
+    .filter(Boolean) as Track[];
+  const futurePlanningWindow = (state.plan.futurePlanningWindowTrackIds ?? [])
+    .map((trackId) => state.queue.find((track) => track.id === trackId))
+    .filter(Boolean) as Track[];
+  const activeEdge = state.transitions.find(
+    (edge) => edge.sourceTrackId === state.plan.sourceTrackId
+      && edge.targetTrackId === state.plan.targetTrackId,
+  );
+  const followingTrack = sourceIndex >= 0 ? state.queue[sourceIndex + 2] : undefined;
+  const inferredFollowingDraft = followingTrack
+    ? state.transitions.find(
+      (edge) => edge.sourceTrackId === state.plan.targetTrackId
+        && edge.targetTrackId === followingTrack.id
+        && edge.selectedBy === "meta"
+        && edge.status === "feasible",
+    )
+    : undefined;
+  const scopeLabel = planningMode === "rolling_abcd"
+    ? "1 plan · 3 transitions"
+    : planningMode === "rolling_abc"
+      ? "Legacy 2-transition window"
+    : planningMode === "promoted_rolling_draft"
+      ? "Promoted rolling draft"
+      : "2-track clean-break pair";
   const isTerminal = ["completed", "invalidated", "cancelled"].includes(
     state.plan.status,
   );
@@ -245,6 +281,47 @@ function PlanPanel({ state }: { state: CopilotState }) {
           <div><i /><i /><i /><i /></div>
         </div>
         <TrackMini track={target} />
+      </div>
+
+      <div className="planning-scope">
+        <div className="planning-scope__header">
+          <span>Meta decision scope</span>
+          <strong>{scopeLabel}</strong>
+        </div>
+        <div className="planning-scope__tracks">
+          {planningWindow.map((track, index) => (
+            <span key={track.id}>
+              {index > 0 && <i>→</i>}
+              <b>{track.title}</b>
+            </span>
+          ))}
+        </div>
+        <p>
+          {activeEdge?.candidateCount ?? "—"} local candidates → 1 Meta decision.
+          {state.plan.followingDraft || inferredFollowingDraft
+            ? " The first edge is executable; the second edge is preserved as a Meta draft, not armed."
+            : planningMode === "promoted_rolling_draft"
+              ? " This executable plan was promoted from the prior three-track Meta decision."
+              : " Only this edge was decided by Meta; later edges are analyzer standby only."}
+        </p>
+        {state.plan.activeTransitionLocked && (
+          <div className="planning-scope__header">
+            <span>Active edge locked</span>
+            <strong>
+              Future window {state.plan.futurePlanStatus ?? "idle"}
+            </strong>
+          </div>
+        )}
+        {futurePlanningWindow.length > 0 && (
+          <div className="planning-scope__tracks">
+            {futurePlanningWindow.map((track, index) => (
+              <span key={`future-${track.id}`}>
+                {index > 0 && <i>→</i>}
+                <b>{track.title}</b>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="cue-grid">
@@ -319,9 +396,18 @@ function QueuePanel({
     || (["curating", "analyzing", "planning"].includes(builder?.status ?? "") ? notice : null)
     || builder?.reason;
   const prepared = Boolean(builder?.queue.length);
+  const queueDragLocked = true;
   const shownQueue = prepared ? builder!.queue : state.queue;
+  const liveEdges = new Map(
+    (state.transitions ?? []).map((transition) => [
+      `${transition.sourceTrackId}:${transition.targetTrackId}`,
+      transition,
+    ]),
+  );
   const transitions = prepared
-    ? builder!.transitions
+    ? builder!.transitions.map((transition) => (
+      liveEdges.get(`${transition.sourceTrackId}:${transition.targetTrackId}`) ?? transition
+    ))
     : state.transitions ?? (state.dataSource === "simulation" ? initialState.transitions : []);
   const edgeAfter = new Map(
     transitions.map((transition) => [
@@ -329,6 +415,14 @@ function QueuePanel({
       transition,
     ]),
   );
+  const liveCurrentIndex = state.queue.findIndex((track) => track.state === "current");
+  const liveBuffer = liveCurrentIndex >= 0
+    ? state.queue.slice(liveCurrentIndex, liveCurrentIndex + 5)
+    : [];
+  const readyBufferEdges = liveBuffer.slice(1, 4).filter((track) => {
+    const edge = edgeAfter.get(track.id);
+    return edge && ["ready", "armed", "executing"].includes(edge.status);
+  }).length;
   const dropBefore = (targetId: string) => {
     if (!builder || !draggedId || draggedId === targetId) return;
     const ordered = builder.orderedTrackIds.filter((id) => id !== draggedId);
@@ -345,7 +439,11 @@ function QueuePanel({
           </span>
           <h2>{prepared ? "Tonight’s set" : "Queue"}</h2>
         </div>
-        <span className="count-badge">{shownQueue.length} tracks</span>
+        <span className="count-badge">
+          {liveBuffer.length >= 2
+            ? `${readyBufferEdges}/3 transitions ready · ${liveBuffer.length} tracks`
+            : `${shownQueue.length} tracks`}
+        </span>
       </div>
       {state.dataSource === "live" && (
         <div className="set-builder">
@@ -412,20 +510,29 @@ function QueuePanel({
       <div className="queue-list" role="list" aria-label="Performance queue">
         {shownQueue.map((track, index) => {
           const transition = edgeAfter.get(track.id);
-          const liveTrack = "state" in track ? track : null;
+          const bufferSlot = liveBuffer.findIndex((item) => item.id === track.id);
+          const inboundTransition = bufferSlot > 0
+            ? edgeAfter.get(liveBuffer[bufferSlot - 1].id)
+            : null;
+          const trackIsBufferReady = bufferSlot === 0 || Boolean(
+            inboundTransition
+            && ["ready", "armed", "executing"].includes(inboundTransition.status),
+          );
+          const liveTrack = state.queue.find((item) => item.id === track.id)
+            ?? ("state" in track ? track : null);
           const analysisStatus = "analysisStatus" in track ? track.analysisStatus : null;
           return (
             <div
               className={`queue-item ${draggedId === track.id ? "is-dragging" : ""}`}
               key={track.id}
               role="listitem"
-              draggable={prepared && !disabled}
+              draggable={prepared && !disabled && !queueDragLocked}
               onDragStart={() => setDraggedId(track.id)}
               onDragEnd={() => setDraggedId(null)}
               onDragOver={(event) => prepared && event.preventDefault()}
               onDrop={() => dropBefore(track.id)}
             >
-              <div className={`queue-row queue-row--${liveTrack?.state ?? "queued"}`}>
+              <div className={`queue-row queue-row--${liveTrack?.state ?? "queued"} ${bufferSlot >= 0 ? "is-buffered" : ""}`}>
                 <span className="queue-row__number">
                   {liveTrack?.state === "current" ? <Icon name="play" /> : index + 1}
                 </span>
@@ -433,16 +540,18 @@ function QueuePanel({
                   <strong>{track.title}</strong>
                   <span>
                     {track.bpm ? `${Math.round(track.bpm)} BPM` : "BPM pending"}
-                    {"energy" in track ? ` · ${track.energy}` : ` · ${track.genre}`}
                   </span>
                 </div>
                 <span className={`queue-row__state ${analysisStatus ? `analysis--${analysisStatus}` : ""}`}>
-                  {analysisStatus ?? liveTrack?.state}
+                  {bufferSlot >= 0
+                    ? `${bufferSlot === 0 ? "Live" : trackIsBufferReady ? "Ready" : "Pending"} · ${bufferSlot + 1}/${liveBuffer.length}`
+                    : liveTrack?.state ?? analysisStatus}
                 </span>
               </div>
               {transition && (
                 <TransitionReadiness
                   edge={transition}
+                  insideBuffer={bufferSlot >= 0 && bufferSlot < liveBuffer.length - 1}
                   currentBeat={state.decks.find(
                     (deck) => deck.playing && deck.track?.id === transition.sourceTrackId,
                   )?.beatIndex}
@@ -456,7 +565,7 @@ function QueuePanel({
         <Icon name="shield" />
         <p>
           {prepared
-            ? "Drag future tracks to reorder. Only changed adjacent edges are reanalyzed; the live Mixxx queue is untouched."
+            ? "Queue reordering is temporarily locked while the rolling transition planner is being validated."
             : "Only adjacent pairs are analyzed. Reordering invalidates affected edges."}
         </p>
       </div>
@@ -467,28 +576,41 @@ function QueuePanel({
 function TransitionReadiness({
   edge,
   currentBeat,
+  insideBuffer = true,
 }: {
   edge: TransitionEdge;
   currentBeat?: number | null;
+  insideBuffer?: boolean;
 }) {
-  const selectedBy = edge.selectedBy?.replace("deterministic_fallback", "fallback");
+  const selectedBy = edge.status !== "planning" && edge.selectedBy === "meta"
+    ? "Meta"
+    : null;
   const nextTiming = edge.sourceExitBeat != null && edge.targetEntryBeat != null
     ? `Beat ${edge.sourceExitBeat} → ${edge.targetEntryBeat}${edge.bars ? ` · ${edge.bars} bars` : ""}`
     : null;
   const beatsToFinalArm = currentBeat != null && edge.sourceExitBeat != null
     ? edge.sourceExitBeat - 16 - currentBeat
     : null;
-  const displayStatus = edge.status === "analyzed" && edge.standbyReady
-    ? "Fallback available"
-    : edge.status === "standby"
-      ? "Fallback available"
+  const usesMeta = edge.selectedBy === "meta";
+  const displayStatus = edge.status === "planning"
+      ? "Calling Meta…"
+      : edge.status === "planned"
+        ? "Meta planned · not armed"
       : edge.status === "needs_human"
         ? "Needs human"
+        : !usesMeta
+          ? insideBuffer ? "Meta not planned" : "Waiting beyond buffer"
         : edge.status === "ready"
-          ? "Plan ready"
-          : edge.status === "feasible"
-            ? "Future draft"
-            : edge.status.replaceAll("_", " ");
+          ? "Meta plan ready"
+          : edge.status === "armed"
+            ? "Meta armed"
+            : edge.status === "executing"
+              ? "Meta executing"
+              : edge.status === "completed"
+                ? "Meta completed"
+                : edge.status === "feasible"
+                  ? "Future draft"
+                  : edge.status.replaceAll("_", " ");
   return (
     <div className={`transition-edge transition-edge--${edge.status}`}>
       <i />
@@ -496,19 +618,16 @@ function TransitionReadiness({
       {selectedBy && <span>{selectedBy}</span>}
       {nextTiming && <small>{nextTiming}</small>}
       <small>{edge.candidateCount} candidates</small>
-      {edge.standbyReady
-        && ["analyzed", "standby", "planning", "feasible"].includes(edge.status)
-        && (
-        <small>Fallback only · no live plan armed</small>
-      )}
-      {beatsToFinalArm != null && ["planning", "standby"].includes(edge.status) && (
+      {beatsToFinalArm != null && ["planning", "planned"].includes(edge.status) && (
         <small className={beatsToFinalArm <= 32 ? "is-warning" : ""}>
           {beatsToFinalArm > 0
             ? `${beatsToFinalArm} beats until final safe arm`
             : "Final safe arm point passed"}
         </small>
       )}
-      {edge.reason && <small title={edge.reason}>{edge.reason.replaceAll("_", " ")}</small>}
+      {edge.reason && (usesMeta || edge.status === "needs_human") && (
+        <small title={edge.reason}>{edge.reason.replaceAll("_", " ")}</small>
+      )}
     </div>
   );
 }
@@ -781,6 +900,30 @@ function App() {
     }
   };
 
+  const setAutoArm = async (enabled: boolean) => {
+    setActionPending(true);
+    setActionNotice(null);
+    try {
+      const response = await fetch("http://127.0.0.1:8765/api/auto-arm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error ?? `Bridge returned ${response.status}`);
+      }
+      setState((current) => ({ ...current, autoArmEnabled: enabled }));
+      setActionNotice(payload.message ?? `Auto arm ${enabled ? "enabled" : "disabled"}`);
+    } catch (error) {
+      setActionNotice(
+        `Rejected: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setActionPending(false);
+    }
+  };
+
   const buildSet = async (prompt: string, count: number) => {
     setActionPending(true);
     setActionNotice("Meta is curating the bounded local catalog…");
@@ -904,7 +1047,9 @@ function App() {
           <span>{state.dataSource === "live" ? "Live observer" : "Demo controls"}</span>
           <p>
             {state.dataSource === "live"
-              ? "Live Mixxx sync is active. Arm and takeover stay behind local lifecycle checks."
+              ? state.autoArmEnabled
+                ? "Planning stays three tracks ahead. Ready transitions auto-arm after deck rotation."
+                : "Planning stays three tracks ahead. Every ready transition waits for human approval."
               : "Every action is labeled simulation until the live adapter is connected."}
           </p>
           {state.dataSource === "live" && actionNotice && (
@@ -939,6 +1084,13 @@ function App() {
               onClick={() => { window.location.href = "/"; }}
             >
               Open simulation
+            </button>
+            <button
+              className={`button ${state.autoArmEnabled ? "button--toggle-on" : "button--ghost"}`}
+              disabled={actionPending}
+              onClick={() => void setAutoArm(!state.autoArmEnabled)}
+            >
+              Auto arm {state.autoArmEnabled ? "On" : "Off"}
             </button>
             <button
               className="button button--secondary"

@@ -189,6 +189,15 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .plan-route__bridge > div::before, .plan-route__bridge > div::after { content: ""; height: 1px; flex: 1; background: linear-gradient(90deg, transparent, rgba(255,255,255,.25)); }
 .plan-route__bridge > div::after { transform: rotate(180deg); }
 .plan-route__bridge i { width: 3px; height: 3px; border-radius: 50%; background: var(--violet); }
+.planning-scope { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 11px; background: rgba(102,225,255,.035); border: 1px solid rgba(102,225,255,.12); }
+.planning-scope__header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.planning-scope__header span { font: 500 10px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; }
+.planning-scope__header strong { font: 500 11px "DM Mono", monospace; color: var(--cyan); text-transform: uppercase; }
+.planning-scope__tracks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.planning-scope__tracks span { display: inline-flex; gap: 6px; align-items: center; }
+.planning-scope__tracks i { color: var(--muted); font-style: normal; }
+.planning-scope__tracks b { font-size: 12px; color: #e7e8ee; }
+.planning-scope p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 
 .cue-grid { display: grid; grid-template-columns: repeat(4,1fr); margin: 14px 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .cue-grid > div { padding: 12px 14px; display: flex; flex-direction: column; }
@@ -213,12 +222,14 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .queue-item[draggable="true"]:active { cursor: grabbing; }
 .queue-item.is-dragging { opacity: .42; }
 .queue-row--current { color: #f3f4f8; background: rgba(169,138,255,.08); box-shadow: inset 2px 0 var(--violet); }
+.queue-row.is-buffered { background-image: linear-gradient(90deg, rgba(102,225,255,.055), transparent 58%); }
+.queue-row.is-buffered .queue-row__state { color: var(--green); }
 .queue-row--played { opacity: .55; }
 .queue-row__number { font: 500 11px "DM Mono", monospace; text-align: center; }
 .queue-row__number svg { color: var(--violet); vertical-align: middle; }
-.queue-row__identity { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
-.queue-row__identity strong { min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.queue-row__identity span { flex: 0 0 auto; font: 400 10px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
+.queue-row__identity { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; }
+.queue-row__identity strong { min-width: 0; font-size: 14px; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+.queue-row__identity span { font: 400 10px "DM Mono", monospace; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
 .queue-row__state { font: 400 10px "DM Mono", monospace; text-transform: uppercase; }
 .queue-row__state.analysis--analyzing { color: var(--amber); }
 .queue-row__state.analysis--ready { color: var(--cyan); }
@@ -229,7 +240,7 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .transition-edge span + span, .transition-edge small { padding-left: 7px; border-left: 1px solid var(--line); }
 .transition-edge small { color: var(--muted); font: inherit; }
 .transition-edge--ready, .transition-edge--armed, .transition-edge--executing, .transition-edge--completed { color: var(--green); }
-.transition-edge--feasible, .transition-edge--standby { color: var(--cyan); }
+.transition-edge--feasible, .transition-edge--standby, .transition-edge--planned { color: var(--cyan); }
 .transition-edge--planning, .transition-edge--analyzing { color: var(--amber); }
 .transition-edge--blocked, .transition-edge--invalidated, .transition-edge--needs_human, .transition-edge--expired { color: var(--red); }
 .transition-edge--pending { color: var(--muted); }
@@ -265,6 +276,7 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .button--danger { color: var(--red); border-color: rgba(255,111,125,.25); }
 .button--danger:hover { background: rgba(255,111,125,.08); }
 .button--ghost { color: var(--muted); }
+.button--toggle-on { color: var(--green); border-color: rgba(107,231,174,.3); background: rgba(107,231,174,.09); }
 
 @media (max-width: 940px) {
   .topbar { padding: 0 16px; }

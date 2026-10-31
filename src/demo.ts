@@ -60,6 +60,7 @@ const queue: QueueItem[] = [
 export const initialState: CopilotState = {
   dataSource: "simulation",
   connected: true,
+  autoArmEnabled: false,
   queueRevision: 3,
   performanceRevision: 18,
   crossfader: 1,

@@ -52,7 +52,12 @@ export type TransitionEdgeStatus =
   | "analyzed"
   | "standby"
   | "planning"
+  | "planned"
   | "ready"
+  | "armed"
+  | "executing"
+  | "completed"
+  | "cancelled"
   | "feasible"
   | "blocked"
   | "needs_human"
@@ -96,6 +101,19 @@ export interface TransitionPlan {
   queueRevision: number;
   performanceRevision: number;
   invalidationReason: string | null;
+  planningWindowTrackIds?: string[];
+  planningMode?: "pair_clean_break" | "rolling_abc" | "rolling_abcd" | "promoted_rolling_draft";
+  activeTransitionLocked?: boolean;
+  futurePlanStatus?: "idle" | "planning" | "ready";
+  futurePlanningWindowTrackIds?: string[];
+  followingDraft?: {
+    sourceTrackId: string;
+    targetTrackId: string;
+    sourceExitBeat: number;
+    targetEntryBeat: number;
+    bars: number;
+    status: string;
+  } | null;
 }
 
 export interface PerformanceEvent {
@@ -109,6 +127,7 @@ export interface PerformanceEvent {
 export interface CopilotState {
   dataSource: DataSource;
   connected: boolean;
+  autoArmEnabled: boolean;
   queueRevision: number;
   performanceRevision: number;
   crossfader: number;

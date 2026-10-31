@@ -17,18 +17,23 @@ from urllib.request import Request, urlopen
 Intent = Literal["maintain_energy", "clean_break", "impact_at_handoff"]
 ALLOWED_INTENTS = {"maintain_energy", "clean_break", "impact_at_handoff"}
 MAX_MODEL_CANDIDATES = 10
+MINIMUM_DWELL_BEATS = 32
+LATE_ENTRY_PENALTY = 0.08
 DEFAULT_META_MODEL = "muse-spark-1.3"
 DEFAULT_META_API_BASE = "https://api.meta.ai/v1"
 
 SYSTEM_INSTRUCTION = """
-You are a constrained A-B-C DJ transition planner. Local deterministic code
+You are a constrained rolling DJ transition planner. Local deterministic code
 already rejected candidates that violate track identity, queue revision,
-transition duration, minimum dwell, or B entry-before-exit ordering. Choose
+transition duration, minimum dwell, or entry-before-exit ordering. Choose
 exactly one supplied candidate_id. Never invent beat indexes, track IDs,
 transition lengths, scores, or candidate IDs. Respond with exactly one JSON
 object containing only selected_candidate_id, intent, use_bass_swap,
 confidence, and reason. The reason must be concise and grounded in supplied
 measurements.
+When musical scores are comparable, prefer the candidate with earlier target
+entries so the following transition retains runway. Never trade chronology for
+a higher score: every later source exit must remain after its target entry.
 """.strip()
 
 
@@ -95,7 +100,7 @@ def build_rolling_candidates(
     following_pairing: dict[str, Any],
     *,
     intent: Intent = "maintain_energy",
-    minimum_dwell_beats: int = 128,
+    minimum_dwell_beats: int = MINIMUM_DWELL_BEATS,
     limit: int = MAX_MODEL_CANDIDATES,
 ) -> list[dict[str, Any]]:
     if intent not in ALLOWED_INTENTS:
@@ -149,6 +154,136 @@ def build_rolling_candidates(
     )[:limit]
 
 
+def _edge_options(
+    pairing: dict[str, Any],
+    *,
+    intent: Intent,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Normalize sync and clean-break pairs into one bounded edge contract."""
+    rows: list[dict[str, Any]] = []
+    source = pairing.get("pairs") or pairing.get("clean_break_pairs") or []
+    for pair in source:
+        mode = "clean_break" if pair.get("transition_mode") == "clean_break" else "beat_sync_crossfade"
+        bars_options = [0] if mode == "clean_break" else pair["transition_bar_options"]
+        for bars in bars_options:
+            score = (
+                float(pair["heuristic_score"])
+                if mode == "clean_break"
+                else _pair_score(pair, int(bars), intent)
+            )
+            rows.append(
+                {
+                    "mode": mode,
+                    "pair_rank": int(pair["rank"]),
+                    "source_exit_beat_index": int(pair["a_exit"]["beat_index"]),
+                    "target_entry_beat_index": int(pair["b_entry"]["beat_index"]),
+                    "transition_bars": int(bars),
+                    "score": score,
+                    "pair": pair,
+                }
+            )
+    if not rows:
+        return []
+    entries = [int(row["target_entry_beat_index"]) for row in rows]
+    earliest, latest = min(entries), max(entries)
+    span = max(1, latest - earliest)
+    for row in rows:
+        relative_lateness = (
+            int(row["target_entry_beat_index"]) - earliest
+        ) / span
+        row["entry_lateness_penalty"] = LATE_ENTRY_PENALTY * relative_lateness
+        row["planning_score"] = float(row["score"]) - float(
+            row["entry_lateness_penalty"]
+        )
+    return sorted(
+        rows,
+        key=lambda row: float(row["planning_score"]),
+        reverse=True,
+    )[:limit]
+
+
+def build_three_transition_candidates(
+    pairings: tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    *,
+    intent: Intent = "maintain_energy",
+    minimum_dwell_beats: int = MINIMUM_DWELL_BEATS,
+    limit: int = MAX_MODEL_CANDIDATES,
+) -> list[dict[str, Any]]:
+    """Build one A-B-C-D plan candidate containing exactly three edges."""
+    if intent not in ALLOWED_INTENTS:
+        raise ValueError(f"unsupported intent: {intent}")
+    edge_sets = [_edge_options(pairing, intent=intent) for pairing in pairings]
+    candidates: list[dict[str, Any]] = []
+    for ab in edge_sets[0]:
+        b_minimum_exit = (
+            int(ab["target_entry_beat_index"])
+            + int(ab["transition_bars"]) * 4
+            + minimum_dwell_beats
+        )
+        for bc in edge_sets[1]:
+            if int(bc["source_exit_beat_index"]) < b_minimum_exit:
+                continue
+            c_minimum_exit = (
+                int(bc["target_entry_beat_index"])
+                + int(bc["transition_bars"]) * 4
+                + minimum_dwell_beats
+            )
+            for cd in edge_sets[2]:
+                if int(cd["source_exit_beat_index"]) < c_minimum_exit:
+                    continue
+                transitions = [
+                    {key: value for key, value in edge.items() if key != "pair"}
+                    for edge in (ab, bc, cd)
+                ]
+                identity = {"transitions": transitions}
+                candidates.append(
+                    {
+                        "candidate_id": _candidate_id(identity),
+                        "transitions": transitions,
+                        "combined_score": (
+                            0.5 * float(ab["planning_score"])
+                            + 0.3 * float(bc["planning_score"])
+                            + 0.2 * float(cd["planning_score"])
+                        ),
+                    }
+                )
+    return sorted(
+        candidates,
+        key=lambda row: float(row["combined_score"]),
+        reverse=True,
+    )[:limit]
+
+
+def build_append_candidates(
+    pairing: dict[str, Any],
+    *,
+    prior_target_entry_beat: int,
+    prior_transition_bars: int,
+    intent: Intent = "maintain_energy",
+    minimum_dwell_beats: int = MINIMUM_DWELL_BEATS,
+    limit: int = MAX_MODEL_CANDIDATES,
+) -> list[dict[str, Any]]:
+    """Build only the new tail edge while preserving the first two edges."""
+    minimum_exit = (
+        prior_target_entry_beat + prior_transition_bars * 4 + minimum_dwell_beats
+    )
+    rows = []
+    for edge in _edge_options(pairing, intent=intent, limit=25):
+        if int(edge["source_exit_beat_index"]) < minimum_exit:
+            continue
+        transition = {key: value for key, value in edge.items() if key != "pair"}
+        identity = {"append_transition": transition}
+        rows.append(
+            {
+                "candidate_id": _candidate_id(identity),
+                "transition": transition,
+                "combined_score": float(edge["planning_score"]),
+            }
+        )
+    return sorted(rows, key=lambda row: row["combined_score"], reverse=True)[:limit]
+
+
 def select_future_fallback(
     candidates: list[dict[str, Any]],
     *,
@@ -171,17 +306,20 @@ def prompt_for(
     *,
     queue_revision: int,
     intent: Intent,
-    track_ids: tuple[str, str, str],
+    track_ids: tuple[str, ...],
 ) -> str:
     if not candidates:
         raise ValueError("no feasible A-B-C candidates")
     bounded = candidates[:MAX_MODEL_CANDIDATES]
     return json.dumps(
         {
-            "task": "select_one_temporally_feasible_abc_transition",
+            "task": "select_one_temporally_feasible_rolling_plan",
             "queue_revision": queue_revision,
             "intent": intent,
-            "tracks": {"a": track_ids[0], "b": track_ids[1], "c": track_ids[2]},
+            "tracks": {
+                chr(ord("a") + index): track_id
+                for index, track_id in enumerate(track_ids)
+            },
             "candidate_data": bounded,
             "required_output_fields": [
                 "selected_candidate_id",
@@ -251,9 +389,7 @@ def validate_decision(
     if decision.selected_candidate_id not in allowed:
         raise ValueError("Meta selected an unknown candidate")
     candidate = allowed[decision.selected_candidate_id]
-    if int(candidate["b_exit_beat_index"]) < int(
-        candidate["minimum_exit_beat_index"]
-    ):
+    if "minimum_exit_beat_index" in candidate and int(candidate["b_exit_beat_index"]) < int(candidate["minimum_exit_beat_index"]):
         raise ValueError("Meta selected a candidate that violates minimum dwell")
     return candidate
 
@@ -300,7 +436,7 @@ def select_with_meta(
     *,
     queue_revision: int,
     intent: Intent,
-    track_ids: tuple[str, str, str],
+    track_ids: tuple[str, ...],
     model: str,
     transport: Callable[[str, str], str],
 ) -> MetaSelection:
