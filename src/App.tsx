@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { event, initialState, tracks } from "./demo";
+import { MetaActivity } from "./MetaActivity";
 import type {
   CopilotState,
   DeckState,
@@ -245,8 +246,8 @@ function PlanPanel({ state }: { state: CopilotState }) {
         && edge.status === "feasible",
     )
     : undefined;
-  const scopeLabel = planningMode === "rolling_abcd"
-    ? "1 plan · 3 transitions"
+  const scopeLabel = planningMode === "rolling_abcd" || planningMode === "rolling_tail"
+    ? `1 plan · ${Math.max(1, planningWindow.length - 1)} transitions`
     : planningMode === "rolling_abc"
       ? "Legacy 2-transition window"
     : planningMode === "promoted_rolling_draft"
@@ -298,15 +299,17 @@ function PlanPanel({ state }: { state: CopilotState }) {
         </div>
         <p>
           {activeEdge?.candidateCount ?? "—"} local candidates → 1 Meta decision.
-          {state.plan.followingDraft || inferredFollowingDraft
+          {planningMode === "rolling_abcd" || planningMode === "rolling_tail"
+            ? " The first edge is executable; the remaining edges are preserved as Meta plans awaiting promotion."
+            : state.plan.followingDraft || inferredFollowingDraft
             ? " The first edge is executable; the second edge is preserved as a Meta draft, not armed."
             : planningMode === "promoted_rolling_draft"
               ? " This executable plan was promoted from the prior three-track Meta decision."
               : " Only this edge was decided by Meta; later edges are analyzer standby only."}
         </p>
-        {state.plan.activeTransitionLocked && (
+        {(state.plan.activeTransitionLocked || (state.plan.futurePlanStatus && state.plan.futurePlanStatus !== "idle")) && (
           <div className="planning-scope__header">
-            <span>Active edge locked</span>
+            <span>{state.plan.activeTransitionLocked ? "Active edge locked" : "Future transitions"}</span>
             <strong>
               Future window {state.plan.futurePlanStatus ?? "idle"}
             </strong>
@@ -323,6 +326,8 @@ function PlanPanel({ state }: { state: CopilotState }) {
           </div>
         )}
       </div>
+
+      <MetaActivity state={state} />
 
       <div className="cue-grid">
         <div>
@@ -441,7 +446,7 @@ function QueuePanel({
         </div>
         <span className="count-badge">
           {liveBuffer.length >= 2
-            ? `${readyBufferEdges}/3 transitions ready · ${liveBuffer.length} tracks`
+            ? `${readyBufferEdges}/${Math.min(3, Math.max(0, liveBuffer.length - 2))} future transitions ready · ${liveBuffer.length} tracks`
             : `${shownQueue.length} tracks`}
         </span>
       </div>
@@ -592,7 +597,9 @@ function TransitionReadiness({
     ? edge.sourceExitBeat - 16 - currentBeat
     : null;
   const usesMeta = edge.selectedBy === "meta";
-  const displayStatus = edge.status === "planning"
+  const displayStatus = edge.status === "completed"
+      ? usesMeta ? "Meta completed" : "Completed"
+      : edge.status === "planning"
       ? "Calling Meta…"
       : edge.status === "planned"
         ? "Meta planned · not armed"
@@ -606,9 +613,7 @@ function TransitionReadiness({
             ? "Meta armed"
             : edge.status === "executing"
               ? "Meta executing"
-              : edge.status === "completed"
-                ? "Meta completed"
-                : edge.status === "feasible"
+              : edge.status === "feasible"
                   ? "Future draft"
                   : edge.status.replaceAll("_", " ");
   return (
@@ -617,6 +622,11 @@ function TransitionReadiness({
       <span>{displayStatus}</span>
       {selectedBy && <span>{selectedBy}</span>}
       {nextTiming && <small>{nextTiming}</small>}
+      {usesMeta && edge.metaOrigin && <small title={`Request ${edge.metaOrigin.requestId} · candidate ${edge.metaOrigin.candidateId ?? "pair selection"}`}>
+        Plan from Meta · {new Date(edge.metaOrigin.selectedAt).toLocaleTimeString("en-GB")}
+        {" · "}{edge.metaOrigin.requestId.slice(-8)}
+      </small>}
+      {usesMeta && !edge.metaOrigin && <small>Earlier Meta decision · request history unavailable</small>}
       <small>{edge.candidateCount} candidates</small>
       {beatsToFinalArm != null && ["planning", "planned"].includes(edge.status) && (
         <small className={beatsToFinalArm <= 32 ? "is-warning" : ""}>
@@ -680,6 +690,8 @@ function App() {
     [state.decks, state.plan.sourceTrackId],
   );
   const planCanStillExecute = ACTIVE_PLAN_STATUSES.includes(state.plan.status);
+  const needsRecovery = Boolean(state.plan.recoveryReason)
+    || ["cancelled", "invalidated"].includes(state.plan.status);
   const beatsUntilCue = !planCanStillExecute || activeSourceDeck?.beatIndex == null
     ? null
     : state.plan.sourceCueBeat - activeSourceDeck.beatIndex;
@@ -859,7 +871,7 @@ function App() {
     });
   };
 
-  const sendLiveAction = async (action: "plan" | "arm" | "takeover") => {
+  const sendLiveAction = async (action: "plan" | "arm" | "takeover" | "recover") => {
     setActionPending(true);
     setActionNotice(null);
     try {
@@ -868,7 +880,7 @@ function App() {
       });
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(payload.error ?? `Bridge returned ${response.status}`);
+        throw new Error(payload.message ?? payload.error ?? `Bridge returned ${response.status}`);
       }
       if (action === "takeover" && payload.status === "cancelled") {
         setState((current) => ({
@@ -1048,8 +1060,8 @@ function App() {
           <p>
             {state.dataSource === "live"
               ? state.autoArmEnabled
-                ? "Planning stays three tracks ahead. Ready transitions auto-arm after deck rotation."
-                : "Planning stays three tracks ahead. Every ready transition waits for human approval."
+                ? "The target is three future-ready transitions. Ready transitions auto-arm after deck rotation."
+                : "The target is three future-ready transitions. Every ready transition waits for human approval."
               : "Every action is labeled simulation until the live adapter is connected."}
           </p>
           {state.dataSource === "live" && actionNotice && (
@@ -1101,11 +1113,19 @@ function App() {
             </button>
             <button
               className="button button--primary"
-              disabled={actionPending || state.plan.status !== "ready"}
+              disabled={actionPending || state.plan.status !== "ready" || !activeSourceDeck}
               onClick={() => void sendLiveAction("arm")}
             >
-              <Icon name="play" /> Approve & arm
+              <Icon name="play" /> {state.plan.status === "ready" && !activeSourceDeck ? "Play source to arm" : "Approve & arm"}
             </button>
+            {needsRecovery && <button
+              className="button button--primary"
+              disabled={actionPending || state.decks.filter(deck => deck.playing).length > 1}
+              onClick={() => void sendLiveAction("recover")}
+              title="Plan forward from the observed position. Never rewind or restart the source deck."
+            >
+              {state.decks.some(deck => deck.playing) ? "Recover & arm" : "Recover from position"}
+            </button>}
             <button
               className="button button--danger"
               disabled={actionPending || state.plan.status !== "executing"}

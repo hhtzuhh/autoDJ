@@ -436,44 +436,6 @@ class MetaPlannerTest(unittest.TestCase):
         self.assertEqual(plan["deck_b"]["deck"], 1)
         self.assertEqual(plan["deck_a"]["transition_start_beat_index"], 288)
 
-    def test_buffered_rolling_plan_promotes_without_another_model_call(self) -> None:
-        store = object.__new__(LiveStateStore)
-        store.queue = {"revision": 7}
-        store.analysis_catalog = SimpleNamespace(
-            tracks={
-                "b": SimpleNamespace(analysis_cache_key="b-key"),
-                "c": SimpleNamespace(analysis_cache_key="c-key"),
-            }
-        )
-        store.buffered_meta_plan = {
-            "mode": "rolling_abc",
-            "queue_revision": 7,
-            "track_ids": ["b", "c", "d"],
-            "candidate": self.candidates[0],
-            "decision": self.decision().to_dict(),
-            "model": "muse-test",
-        }
-        store.selection = {}
-        store.transition_overrides = {}
-        store.envelope = None
-        store.supervisor = None
-        written = []
-        store._write_dashboard_selection = written.append
-
-        result = store._promote_buffered_meta_plan("b", "c", 2, 1, 20)
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        status, payload = result
-        self.assertEqual(status, 200)
-        self.assertFalse(payload["model_called"])
-        self.assertEqual(store.selection["planning_window_track_ids"], ["b", "c", "d"])
-        self.assertEqual(
-            store.selection["following_feasible_draft"]["source_track_id"],
-            "c",
-        )
-        self.assertEqual(len(written), 1)
-
     def test_single_transition_buffer_shifts_without_replanning_ready_edges(self) -> None:
         def deck(track_id: str, beat: int):
             return SimpleNamespace(track_id=track_id, beat_index=beat)
@@ -522,25 +484,14 @@ class MetaPlannerTest(unittest.TestCase):
         )
         self.assertEqual(store.selection["next_executable_plan"]["plan_id"], "promoted-b-c")
 
-    def test_lookahead_scheduler_deduplicates_same_future_source(self) -> None:
-        store = object.__new__(LiveStateStore)
-        store.queue = {"ordered_track_ids": ["a", "b", "c", "d"]}
-        store.buffered_meta_plan = None
-        store.lookahead_in_progress = set()
-        store.continuous_set_active = True
-
-        with patch("live_bridge.threading.Thread") as thread:
-            self.assertTrue(store._schedule_lookahead("b"))
-            self.assertFalse(store._schedule_lookahead("b"))
-
-        thread.assert_called_once()
-        thread.return_value.start.assert_called_once()
-
     def test_active_edge_schedules_one_joint_future_window(self) -> None:
         store = object.__new__(LiveStateStore)
+        store.action_lock = threading.RLock()
+        store.future_retry_at = 0.0
+        store.future_retry_context = None
         store.future_plan_in_progress = False
         store.future_transition_plan = None
-        store.queue = {"ordered_track_ids": ["a", "b", "c", "d", "e"]}
+        store.queue = {"revision": 1, "ordered_track_ids": ["a", "b", "c", "d", "e"]}
         store.selection = {
             "next_executable_plan": {
                 "plan_id": "active-a-b",
@@ -603,7 +554,8 @@ class MetaPlannerTest(unittest.TestCase):
         store.action_lock = threading.RLock()
         store.events = deque()
         store.auto_arm_enabled = False
-        store.selection = {"next_executable_plan": {"plan_id": "ready-plan"}}
+        store.envelope = None
+        store.selection = {"next_executable_plan": {"plan_id": "ready-plan", "deck_a": {"audio_sha256": "a"}}}
         store.supervisor = None
         store._executor_running = lambda: False
         arm_calls = []

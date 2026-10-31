@@ -15,6 +15,7 @@ from copy import deepcopy
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -39,6 +40,7 @@ from meta_planner import (  # noqa: E402
     OpenAICompatibleTransport,
     build_rolling_candidates,
     build_three_transition_candidates,
+    build_transition_window_candidates,
     load_dotenv,
     select_future_fallback,
     select_with_meta,
@@ -94,10 +96,15 @@ class LiveStateStore:
         self.raw_performance: Any | None = None
         self.current_track_id: str | None = None
         self.supervisor: Any | None = None
-        self.buffered_meta_plan: dict[str, Any] | None = None
         self.future_transition_plan: dict[str, Any] | None = None
         self.future_plan_in_progress = False
-        self.lookahead_in_progress: set[str] = set()
+        self.future_plan_error: str | None = None
+        self.future_retry_at = 0.0
+        self.meta_calls: deque[dict[str, Any]] = deque(maxlen=8)
+        self.meta_calls_lock = threading.Lock()
+        self.meta_call_attempts: dict[tuple[Any, ...], int] = {}
+        self.future_retry_context: tuple[str, int, int] | None = None
+        self.planning_epoch = 0
         self.human_replan_started_for: set[str] = set()
         self.transition_overrides: dict[tuple[str, str], dict[str, Any]] = {}
         self.action_lock = threading.RLock()
@@ -137,6 +144,7 @@ class LiveStateStore:
         self._seed_standby_overrides()
         self.selection = self._load_selection()
         self.envelope = self._load_envelope()
+        self._invalidate_restored_envelope()
         if not self.envelope or self.envelope.get("status") not in {
             "completed",
             "invalidated",
@@ -147,6 +155,21 @@ class LiveStateStore:
         self.catalog = self._load_catalog()
         self.set_builder = SetBuilderService(workspace)
         self.sampler_slots = self._restore_sampler_slot_registry()
+
+    def _invalidate_restored_envelope(self) -> None:
+        # A disk artifact cannot establish ownership of a running executor.
+        if self.envelope and self.envelope.get("status") in {
+            "draft", "ready", "armed", "executing",
+        }:
+            self.envelope = {
+                **self.envelope,
+                "status": "invalidated",
+                "invalidation_reason": "bridge_restart_needs_human",
+            }
+            self._append_system_event(
+                "Bridge restart requires review",
+                "The persisted plan has no live supervisor; replan from observed Mixxx state before arming.",
+            )
 
     def _load_selection(self) -> dict[str, Any]:
         candidates = (
@@ -229,6 +252,9 @@ class LiveStateStore:
             state = deepcopy(self.state) if self.state is not None else None
             error = self.error
         if state is not None:
+            # These fields must stay live even while activation suspends state
+            # assembly or a foreground request is waiting for Meta.
+            state["plan"].update(self._planning_activity())
             state["setBuilder"] = self.set_builder.snapshot()
             state["setBuilder"]["activation"] = self._activation_snapshot()
         return state, error
@@ -417,11 +443,10 @@ class LiveStateStore:
         self.catalog = self._load_catalog()
         self.transition_overrides.clear()
         self._seed_standby_overrides()
-        self.selection = {}
-        self.buffered_meta_plan = None
+        self._set_selection({})
         self.future_transition_plan = None
-        self.future_plan_in_progress = False
-        self.lookahead_in_progress.clear()
+        self.future_plan_error = None
+        self.future_retry_at = 0.0
         self.supervisor = None
         self.envelope = None
         self.auto_chain_started_for.clear()
@@ -527,7 +552,6 @@ class LiveStateStore:
                 previous_envelope = deepcopy(self.envelope)
                 previous_overrides = deepcopy(self.transition_overrides)
                 previous_sampler_slots = dict(self.sampler_slots)
-                previous_buffer = deepcopy(self.buffered_meta_plan)
                 previous_future_plan = deepcopy(self.future_transition_plan)
                 previous_continuous_set_active = self.continuous_set_active
                 try:
@@ -549,12 +573,11 @@ class LiveStateStore:
                             continue
                         self._install_active_queue(previous_queue)
                         self.current_track_id = previous_current_id
-                        self.selection = previous_selection
+                        self._set_selection(previous_selection)
                         self.supervisor = previous_supervisor
                         self.envelope = previous_envelope
                         self.transition_overrides = previous_overrides
                         self.sampler_slots = previous_sampler_slots
-                        self.buffered_meta_plan = previous_buffer
                         self.future_transition_plan = previous_future_plan
                         self.continuous_set_active = previous_continuous_set_active
                         self._write_dashboard_selection(previous_selection)
@@ -570,12 +593,11 @@ class LiveStateStore:
                 except Exception:
                     self._install_active_queue(previous_queue)
                     self.current_track_id = previous_current_id
-                    self.selection = previous_selection
+                    self._set_selection(previous_selection)
                     self.supervisor = previous_supervisor
                     self.envelope = previous_envelope
                     self.transition_overrides = previous_overrides
                     self.sampler_slots = previous_sampler_slots
-                    self.buffered_meta_plan = previous_buffer
                     self.future_transition_plan = previous_future_plan
                     self.continuous_set_active = previous_continuous_set_active
                     self._write_dashboard_selection(previous_selection)
@@ -615,8 +637,16 @@ class LiveStateStore:
 
     def request_arm(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
+            if (self.envelope or {}).get("invalidation_reason") == "bridge_restart_needs_human":
+                return 409, {
+                    "error": "bridge_restart_needs_human",
+                    "message": "Replan from observed Mixxx state before arming after restart.",
+                }
             if self.raw_performance is None:
                 return 503, {"error": "Mixxx performance snapshot is unavailable"}
+            if self._recovery_reason():
+                return 409, {"error": "recover_from_live_position_required",
+                             "message": "Recover from the current deck before arming; the old transition cannot be resumed."}
             if self._executor_running():
                 return 409, {"error": "a transition executor is already active"}
             if not isinstance(self.selection.get("next_executable_plan"), dict):
@@ -627,6 +657,7 @@ class LiveStateStore:
 
             live_selection = deepcopy(self.selection)
             plan = live_selection["next_executable_plan"]
+            live_selection.setdefault("planning_plan_id", str(plan["plan_id"]))
             unique = f"dashboard-{int(time.time() * 1000)}"
             plan["plan_id"] = f"{plan['plan_id']}-{unique}"
             live_selection["source_window_id"] = (
@@ -671,6 +702,9 @@ class LiveStateStore:
         if not isinstance(enabled, bool):
             return 400, {"error": "enabled_must_be_boolean"}
         with self.action_lock:
+            if enabled and self._recovery_reason():
+                return 409, {"error": "recover_from_live_position_required",
+                             "message": "Recover from the current deck first, then enable Auto arm."}
             self.auto_arm_enabled = enabled
             self._append_system_event(
                 "Auto arm enabled" if enabled else "Auto arm disabled",
@@ -703,70 +737,263 @@ class LiveStateStore:
                 ),
             }
 
-    def _schedule_future_transition_plan(self) -> bool:
-        """Re-optimize the three transitions after the committed active edge."""
-        if self.future_plan_in_progress:
-            return False
+    def _recovery_reason(self) -> str | None:
+        if (self.envelope or {}).get("status") in {"cancelled", "invalidated"}:
+            return str(self.envelope.get("invalidation_reason") or "plan_cancelled")
+        plan = self.selection.get("next_executable_plan", {})
+        current = getattr(self, "current_track_id", None)
+        if current and plan and current != plan["deck_a"]["audio_sha256"]:
+            # An executing handoff may briefly have only the target playing.
+            if (self.envelope or {}).get("status") not in {"armed", "executing", "completed"}:
+                return "live_source_changed"
+        if plan and (self.envelope or {}).get("status") not in {"armed", "executing", "completed"}:
+            performance = getattr(self, "raw_performance", None)
+            source = find_track_deck(performance, plan["deck_a"]["audio_sha256"]) if performance else None
+            latest_arm = plan["deck_a"].get("play_start_beat_index")
+            if source and source[1].beat_index is not None and latest_arm is not None and source[1].beat_index > latest_arm:
+                return "latest_arm_beat_passed"
+        return None
+
+    def _recovery_source(self) -> tuple[int, Any, str]:
+        performance = self.raw_performance
+        if performance is None:
+            raise RuntimeError("Mixxx performance snapshot is unavailable")
+        playing = [(number, deck) for number, deck in performance.decks.items() if deck.play is True]
+        if len(playing) > 1:
+            raise RuntimeError("two_decks_playing_choose_source_first")
+        source = playing[0] if playing else find_track_deck(performance, self.current_track_id)
+        if source is None or source[1].beat_index is None:
+            raise RuntimeError("current_source_deck_is_not_observable")
+        queue_ids = self.queue["ordered_track_ids"]
+        if source[1].track_id not in queue_ids:
+            raise RuntimeError("current_track_is_not_in_queue")
+        index = queue_ids.index(source[1].track_id)
+        if index + 1 >= len(queue_ids):
+            raise RuntimeError("queue_has_no_next_track")
+        target_deck = 3 - source[0]
+        if performance.decks[target_deck].play is not False:
+            raise RuntimeError("recovery_target_must_be_stopped")
+        return source[0], source[1], str(queue_ids[index + 1])
+
+    def _prepare_recovery_target(self, source_deck: int, target_id: str) -> None:
+        target_deck = 3 - source_deck
+        performance = self.raw_performance
+        if performance.decks[target_deck].play is not False:
+            raise RuntimeError("recovery_target_must_be_stopped")
+        if performance.decks[target_deck].track_id == target_id:
+            return
+        slot = self.sampler_slots.get(target_id)
+        if slot is None:
+            raise RuntimeError("next_track_not_prepared_load_it_into_idle_deck")
+        mixxx_root = self.workspace / "experiments/mixxx-control"
+        if str(mixxx_root) not in sys.path:
+            sys.path.insert(0, str(mixxx_root))
+        import mido
+        from probe import port_name, send_load_sampler_value
+        revision = int(performance.revision)
+        with mido.open_output(port_name()) as output:
+            send_load_sampler_value(output, target_deck, slot)
+        if not self._wait_for_loaded_track_after_revision(target_deck, target_id, revision):
+            raise RuntimeError("recovery_next_track_identity_mismatch")
+
+    def request_recover(self) -> tuple[int, dict[str, Any]]:
+        """Explicit forward-only recovery. Never seek or start the source deck."""
+        with self.action_lock:
+            if self._executor_running() or (self.auto_chain_thread and self.auto_chain_thread.is_alive()):
+                return 409, {"error": "wait_for_previous_automation_to_finish"}
+            try:
+                source_deck, source, target_id = self._recovery_source()
+                source_id, was_playing = source.track_id, source.play is True
+                revision = int(self.queue["revision"])
+                self._verify_set_list_edge(source_id, target_id)
+                self.auto_arm_enabled = False
+                self.auto_chain_cancel.set()
+                self.future_transition_plan = None
+                self._set_selection(deepcopy(self.selection))
+                self.selection["transition_buffer"] = []
+                self.selection["following_feasible_draft"] = None
+                self.supervisor = None
+                self.envelope = {"plan_id": self.selection.get("next_executable_plan", {}).get("plan_id", ""),
+                                 "status": "invalidated", "invalidation_reason": "recovering_from_live_position"}
+                self._prepare_recovery_target(source_deck, target_id)
+                latest = self.raw_performance.decks[source_deck]
+                if (int(self.queue["revision"]) != revision or latest.track_id != source_id
+                        or (was_playing and latest.play is not True)):
+                    raise RuntimeError("live_source_changed_during_recovery")
+                self.current_track_id = source_id
+                status, payload = self.request_meta_plan()
+                if status != 200:
+                    return status, payload
+                self._append_system_event("Recovered from current position",
+                    "A new forward plan follows the observed deck. No source seek or restart was sent.")
+                if not was_playing:
+                    return 200, {**payload, "armed": False,
+                                 "message": "Forward plan ready. Playback remains stopped; resume the source, then Approve & arm."}
+                status, payload = self.request_arm()
+                return status, {**payload, "armed": status == 202,
+                                "message": payload.get("message") if status != 202 else
+                                "Recovered and armed from the playing deck. Enable Auto arm to continue later transitions."}
+            except Exception as error:
+                self._append_system_event("Forward recovery unavailable", str(error))
+                return 409, {"error": str(error), "message": f"Recovery unavailable: {error}. Current playback was preserved."}
+
+    def _planning_activity(self) -> dict[str, Any]:
+        with self.meta_calls_lock:
+            calls = deepcopy(list(self.meta_calls))
+        return {
+            "metaCalls": calls,
+            "recoveryReason": self._recovery_reason(),
+            "futurePlanError": self.future_plan_error,
+            "futureRetryInSeconds": max(0, round(self.future_retry_at - time.monotonic(), 1)),
+            "futurePlanStatus": (
+                "planning" if self.future_plan_in_progress
+                else "degraded" if self.future_plan_error
+                else "ready" if self.future_transition_plan is not None
+                else "idle"
+            ),
+        }
+
+    def _begin_meta_call(self, config: MetaConfig, track_ids: tuple[str, ...], scope: str) -> str:
+        request_id = f"meta-{time.time_ns()}"
+        with self.meta_calls_lock:
+            key = (scope, tuple(track_ids), int(self.queue["revision"]))
+            attempt = self.meta_call_attempts.get(key, 0) + 1
+            self.meta_call_attempts[key] = attempt
+            self.meta_calls.appendleft({
+                "id": request_id, "scope": scope, "model": config.model,
+                "trackIds": list(track_ids), "status": "calling", "attempt": attempt,
+                "startedAt": time.time() * 1000, "finishedAt": None,
+                "timeoutSeconds": config.timeout_seconds, "detail": None,
+                "reasoningEffort": config.reasoning_effort, "maxTokens": config.max_tokens,
+                "phase": "preparing_request",
+            })
+        return request_id
+
+    def _meta_transport(self, config: MetaConfig, request_id: str) -> OpenAICompatibleTransport:
+        def record(event: dict[str, Any]) -> None:
+            with self.meta_calls_lock:
+                for call in self.meta_calls:
+                    if call["id"] == request_id:
+                        call.update(event)
+                        break
+        return OpenAICompatibleTransport(config, on_event=record)
+
+    def _stamp_meta_origin(self, compiled: dict[str, Any], request_id: str | None) -> None:
+        """Persist decision provenance so promotion never invents a new API call."""
+        with self.meta_calls_lock:
+            call = next((deepcopy(row) for row in self.meta_calls if row["id"] == request_id), None)
+        if call is None:
+            return
+        compiled["meta_origin"] = {
+            "requestId": call["id"], "requestedAt": call["startedAt"],
+            "selectedAt": call["finishedAt"] or time.time() * 1000,
+            "candidateId": compiled.get("model_decision", {}).get("selected_candidate_id"),
+            "model": call["model"],
+        }
+
+    @staticmethod
+    def _active_edge_details(plan: dict[str, Any]) -> dict[str, Any]:
+        return {key: plan.get(key) for key in (
+            "sourceExitBeat", "targetEntryBeat", "bars", "metaOrigin",
+        )}
+
+    def _finish_meta_call(self, request_id: str | None, error: Exception | None = None) -> None:
+        if request_id is None:
+            return
+        status = "succeeded"
+        if error is not None:
+            status = (
+                "timeout" if isinstance(error, TimeoutError)
+                else "discarded" if str(error) == "active_plan_changed_during_future_meta_call"
+                else "failed"
+            )
+        with self.meta_calls_lock:
+            for index, call in enumerate(self.meta_calls):
+                if call["id"] == request_id:
+                    self.meta_calls[index] = {
+                        **call, "status": status, "finishedAt": time.time() * 1000,
+                        "phase": "finished",
+                        "detail": f"{type(error).__name__}: {error}" if error else None,
+                    }
+                    break
+
+    def _set_selection(self, selection: dict[str, Any]) -> None:
+        """New decisions invalidate workers even if the selected cues repeat."""
+        selection.pop("planning_plan_id", None)
+        self.selection = selection
+        self.planning_epoch = getattr(self, "planning_epoch", 0) + 1
+
+    def _future_context(self) -> tuple[str, int, int] | None:
         active = self.selection.get("next_executable_plan")
         if not isinstance(active, dict):
-            return False
-        queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
-        source_id = str(active["deck_b"]["audio_sha256"])
-        if source_id not in queue_ids or queue_ids.index(source_id) + 3 >= len(queue_ids):
-            return False
-        existing = self.future_transition_plan
-        if (
-            isinstance(existing, dict)
-            and existing.get("based_on_active_plan_id") == active.get("plan_id")
-        ):
-            return False
-        self.future_plan_in_progress = True
-        threading.Thread(
-            target=self._future_transition_plan_worker,
-            args=(str(active["plan_id"]),),
-            name=f"idj-meta-future-{source_id[:8]}",
-            daemon=True,
-        ).start()
-        return True
+            return None
+        envelope = getattr(self, "envelope", None)
+        if envelope and envelope.get("status") in {"invalidated", "cancelled"}:
+            return None
+        return (
+            str(self.selection.get("planning_plan_id", active["plan_id"])),
+            int(self.queue["revision"]), getattr(self, "planning_epoch", 0),
+        )
 
-    def _future_transition_plan_worker(self, active_plan_id: str) -> None:
+    def _schedule_future_transition_plan(self) -> bool:
+        """Replenish after the current edge; serialize requests and rate-limit failures."""
+        with self.action_lock:
+            context = self._future_context()
+            if context is None or self.future_plan_in_progress:
+                return False
+            if getattr(self, "auto_arm_enabled", False) and self.supervisor is None:
+                return False
+            if context == self.future_retry_context and time.monotonic() < self.future_retry_at:
+                return False
+            active = self.selection["next_executable_plan"]
+            queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
+            source_id = str(active["deck_b"]["audio_sha256"])
+            if source_id not in queue_ids or queue_ids.index(source_id) + 1 >= len(queue_ids):
+                return False
+            existing = self.future_transition_plan
+            if (isinstance(existing, dict)
+                and existing.get("based_on_active_plan_id") == context[0]
+                and existing.get("queue_revision") == context[1]
+                and existing.get("based_on_planning_epoch", 0) == context[2]):
+                return False
+            self.future_plan_in_progress = True
+            threading.Thread(
+                target=self._future_transition_plan_worker,
+                args=context,
+                name=f"idj-meta-future-{source_id[:8]}", daemon=True,
+            ).start()
+            return True
+
+    def _future_transition_plan_worker(self, active_plan_id: str, queue_revision: int, planning_epoch: int) -> None:
+        context = (active_plan_id, queue_revision, planning_epoch)
+        meta_call = None
         try:
             with self.action_lock:
+                if self._future_context() != context:
+                    return
                 active = deepcopy(self.selection.get("next_executable_plan"))
-                if not isinstance(active, dict) or active.get("plan_id") != active_plan_id:
+                if not isinstance(active, dict):
                     return
                 queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
                 source_id = str(active["deck_b"]["audio_sha256"])
                 source_index = queue_ids.index(source_id)
                 track_ids = tuple(queue_ids[source_index : source_index + 4])
-                if len(track_ids) != 4:
+                if len(track_ids) < 2:
                     return
                 pairings = tuple(
                     self.transition_pipeline.cache.payload(
                         track_ids[index], track_ids[index + 1]
                     )
-                    for index in range(3)
+                    for index in range(len(track_ids) - 1)
                 )
                 minimum_first_exit = (
                     int(active["deck_b"]["cue_beat_index"])
                     + int(active.get("mix", {}).get("bars", 0)) * 4
                     + MINIMUM_DWELL_BEATS
                 )
-                candidates = [
-                    candidate
-                    for candidate in build_three_transition_candidates(pairings)
-                    if int(
-                        candidate["transitions"][0]["source_exit_beat_index"]
-                    )
-                    >= minimum_first_exit
-                ]
-                candidates = [
-                    candidate
-                    for candidate in candidates
-                    if self._preserves_shifted_three_transition_window(
-                        candidate, source_index, queue_ids
-                    )
-                ]
+                candidates = self._constrained_window_candidates(
+                    pairings, minimum_first_exit, source_index, queue_ids,
+                )
                 if not candidates:
                     raise RuntimeError("no_feasible_future_three_transition_window")
                 queue_revision = int(self.queue["revision"])
@@ -779,47 +1006,29 @@ class LiveStateStore:
                     "Future Meta window started",
                     (
                         f"{active_plan_id} stays locked; {config.model} is jointly "
-                        "planning the next three transitions."
+                        f"planning the next {len(track_ids) - 1} transitions."
                     ),
                 )
 
+            meta_call = self._begin_meta_call(config, track_ids, "future_buffer")
             selection = select_with_meta(
                 candidates,
                 queue_revision=queue_revision,
                 intent="maintain_energy",
                 track_ids=track_ids,
                 model=config.model,
-                transport=OpenAICompatibleTransport(config),
+                transport=self._meta_transport(config, meta_call),
             )
-            compiled = self._compile_three_transition_candidate(
-                track_ids,
-                selection,
-                config.model,
-                source_deck,
-                target_deck,
-            )
-            compiled["selection"] = "meta_future_three_transition_window"
-            compiled["based_on_active_plan_id"] = active_plan_id
             with self.action_lock:
-                latest = self.selection.get("next_executable_plan", {})
-                if (
-                    latest.get("plan_id") != active_plan_id
-                    or int(self.queue["revision"]) != queue_revision
-                ):
+                if self._future_context() != context:
                     raise RuntimeError("active_plan_changed_during_future_meta_call")
-                self.future_transition_plan = compiled
-                for edge in compiled["transition_buffer"]:
-                    self.transition_overrides[
-                        (str(edge["source_track_id"]), str(edge["target_track_id"]))
-                    ] = {
-                        "status": "ready",
-                        "standbyReady": True,
-                        "selectedBy": "meta",
-                        "reason": "Jointly optimized inside the next three-transition Meta window.",
-                        "sourceExitBeat": int(edge["source_exit_beat_index"]),
-                        "targetEntryBeat": int(edge["target_entry_beat_index"]),
-                        "bars": int(edge["transition_bars"]),
-                    }
+                compiled = self._compile_three_transition_candidate(
+                    track_ids, selection, config.model, source_deck, target_deck,
+                )
+                compiled["selection"] = "meta_future_three_transition_window"
+                compiled["based_on_active_plan_id"] = active_plan_id
+                compiled["based_on_planning_epoch"] = planning_epoch
+                self._stamp_meta_origin(compiled, meta_call)
                 output = (
                     self.workspace
                     / "artifacts/live-performance/dashboard-future-meta-selection-v1.json"
@@ -831,21 +1040,46 @@ class LiveStateStore:
                     encoding="utf-8",
                 )
                 temporary.replace(output)
+                self.future_transition_plan = compiled
+                self._finish_meta_call(meta_call)
+                self.future_plan_error = None
+                self.future_retry_at = 0.0
+                for edge in compiled["transition_buffer"]:
+                    self.transition_overrides[
+                        (str(edge["source_track_id"]), str(edge["target_track_id"]))
+                    ] = {
+                        "status": "ready",
+                        "standbyReady": True,
+                        "selectedBy": "meta",
+                        "reason": "Jointly optimized inside the next three-transition Meta window.",
+                        "sourceExitBeat": int(edge["source_exit_beat_index"]),
+                        "targetEntryBeat": int(edge["target_entry_beat_index"]),
+                        "bars": int(edge["transition_bars"]),
+                        "metaOrigin": compiled.get("meta_origin"),
+                    }
                 self._append_system_event(
-                    "Future three-transition window ready",
+                    "Future Meta window ready",
                     (
                         f"{config.model} jointly selected "
-                        f"{track_ids[0][:8]}→{track_ids[1][:8]}→"
-                        f"{track_ids[2][:8]}→{track_ids[3][:8]}."
+                        + " → ".join(track_id[:8] for track_id in track_ids)
                     ),
                 )
         except Exception as error:
+            self._finish_meta_call(meta_call, error)
+            with self.action_lock:
+                self.future_plan_error = f"{type(error).__name__}: {error}"
+                self.future_retry_context = context
+                self.future_retry_at = time.monotonic() + 5.0
             self._append_system_event(
                 "Future Meta window unavailable",
                 f"{type(error).__name__}: {error}",
             )
         finally:
-            self.future_plan_in_progress = False
+            with self.action_lock:
+                self.future_plan_in_progress = False
+                if self._future_context() != context:
+                    self.future_retry_at = 0.0
+                    self._schedule_future_transition_plan()
 
     def _promote_future_transition_plan(
         self,
@@ -877,7 +1111,7 @@ class LiveStateStore:
             or int(plan["deck_b"]["deck"]) != target_deck
         ):
             return None
-        self.selection = future
+        self._set_selection(future)
         self.future_transition_plan = None
         self.envelope = None
         self.supervisor = None
@@ -889,6 +1123,7 @@ class LiveStateStore:
         }
         self._restore_transition_buffer_overrides()
         self._write_dashboard_selection(future)
+        self._maintain_ready_buffer()
         return 200, {
             "accepted": True,
             "status": "ready",
@@ -939,6 +1174,12 @@ class LiveStateStore:
                 return 409, {"error": "current_source_deck_is_not_observable"}
             source_deck_number, source_deck = source_match
             target_deck_number = 1 if source_deck_number == 2 else 2
+            if self.envelope and self.envelope.get("status") in {"invalidated", "cancelled"}:
+                self.future_transition_plan = None
+                self.selection["transition_buffer"] = []
+                self.selection["following_feasible_draft"] = None
+                self.transition_overrides.clear()
+                self._seed_standby_overrides()
             future = self._promote_future_transition_plan(
                 source_id,
                 target_id,
@@ -948,15 +1189,6 @@ class LiveStateStore:
             )
             if future is not None:
                 return future
-            buffered = self._promote_buffered_meta_plan(
-                source_id,
-                target_id,
-                source_deck_number,
-                target_deck_number,
-                int(source_deck.beat_index),
-            )
-            if buffered is not None:
-                return buffered
             draft = self.selection.get("following_feasible_draft")
             if (
                 isinstance(draft, dict)
@@ -986,32 +1218,16 @@ class LiveStateStore:
                     ),
                 )
             immediate = self.transition_pipeline.cache.payload(source_id, target_id)
-            if current_index + 3 < len(queue_ids):
+            if current_index + 1 < len(queue_ids):
                 track_ids_4 = tuple(queue_ids[current_index : current_index + 4])
-                pairings = (
-                    immediate,
+                pairings = tuple(
                     self.transition_pipeline.cache.payload(
-                        track_ids_4[1], track_ids_4[2]
-                    ),
-                    self.transition_pipeline.cache.payload(
-                        track_ids_4[2], track_ids_4[3]
-                    ),
+                        track_ids_4[index], track_ids_4[index + 1]
+                    ) for index in range(len(track_ids_4) - 1)
                 )
-                candidates_4 = [
-                    candidate
-                    for candidate in build_three_transition_candidates(pairings)
-                    if int(
-                        candidate["transitions"][0]["source_exit_beat_index"]
-                    )
-                    > int(source_deck.beat_index) + 16
-                ]
-                candidates_4 = [
-                    candidate
-                    for candidate in candidates_4
-                    if self._preserves_shifted_three_transition_window(
-                        candidate, current_index, queue_ids
-                    )
-                ]
+                candidates_4 = self._constrained_window_candidates(
+                    pairings, int(source_deck.beat_index) + 17, current_index, queue_ids,
+                )
                 if candidates_4:
                     return self._plan_three_transition_buffer(
                         track_ids_4,
@@ -1057,15 +1273,17 @@ class LiveStateStore:
 
             load_dotenv(BACKEND_ROOT.parent / ".env")
             load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+            meta_call = None
             try:
                 config = MetaConfig.from_environment()
+                meta_call = self._begin_meta_call(config, track_ids, "current_plan")
                 selection = select_with_meta(
                     candidates,
                     queue_revision=int(self.queue["revision"]),
                     intent="maintain_energy",
                     track_ids=track_ids,  # type: ignore[arg-type]
                     model=config.model,
-                    transport=OpenAICompatibleTransport(config),
+                    transport=self._meta_transport(config, meta_call),
                 )
                 compiled = self._compile_meta_selection(
                     track_ids,
@@ -1075,7 +1293,10 @@ class LiveStateStore:
                     source_deck_number,
                     target_deck_number,
                 )
+                self._finish_meta_call(meta_call)
+                self._stamp_meta_origin(compiled, meta_call)
             except Exception as error:
+                self._finish_meta_call(meta_call, error)
                 latest_match = find_track_deck(self.raw_performance, source_id)
                 latest_beat = (
                     int(latest_match[1].beat_index)
@@ -1114,7 +1335,7 @@ class LiveStateStore:
                 compiled["next_executable_plan"]["source"] = (
                     "deterministic_fallback_after_meta_failure"
                 )
-                self.selection = compiled
+                self._set_selection(compiled)
                 self.envelope = None
                 self.supervisor = None
                 self.transition_overrides[edge_key] = {
@@ -1139,7 +1360,7 @@ class LiveStateStore:
                     "message": "Meta failed; local standby passed fresh live-beat validation.",
                 }
 
-            self.selection = compiled
+            self._set_selection(compiled)
             self.envelope = None
             self.supervisor = None
             self.transition_overrides[edge_key] = {
@@ -1160,6 +1381,62 @@ class LiveStateStore:
                 "plan_id": compiled["next_executable_plan"]["plan_id"],
                 "message": "Meta selected one locally feasible candidate; local compilation succeeded.",
             }
+
+    def _constrained_window_candidates(
+        self, pairings: tuple[dict[str, Any], ...], minimum_exit: int,
+        source_index: int, queue_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        # The local search remains bounded (16 options per edge, at most 4096
+        # combinations). Apply live constraints BEFORE the ten-candidate API cap.
+        load_dotenv(BACKEND_ROOT.parent / ".env")
+        load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+        feasible = []
+        shifted_feasibility: dict[tuple[int, int], bool] = {}
+        for candidate in build_transition_window_candidates(pairings, limit=None):
+            first = candidate["transitions"][0]
+            if int(first["source_exit_beat_index"]) < minimum_exit:
+                continue
+            key = (int(first["target_entry_beat_index"]), int(first["transition_bars"]))
+            if key not in shifted_feasibility:
+                shifted_feasibility[key] = self._preserves_shifted_three_transition_window(
+                    candidate, source_index, queue_ids,
+                )
+            if shifted_feasibility[key]:
+                feasible.append(candidate)
+        for candidate in feasible:
+            candidate["refill_timing"] = self._window_refill_timing(
+                candidate["transitions"], queue_ids[source_index:source_index + len(pairings) + 1],
+            )
+        sufficient = [row for row in feasible if row["refill_timing"]["status"] == "sufficient"]
+        if sufficient:
+            return sufficient[:10]
+        # Still return executable plans if none can reserve a full retry budget,
+        # but prefer more runway and expose the shortfall rather than invent ready.
+        feasible.sort(key=lambda row: row["refill_timing"]["minimumRunwaySeconds"] or 0, reverse=True)
+        return feasible[:10]
+
+    def _window_refill_timing(self, edges: list[dict[str, Any]], track_ids: list[str]) -> dict[str, Any]:
+        try:
+            timeout = float(os.environ.get("META_TIMEOUT_SECONDS", "30"))
+        except ValueError:
+            timeout = 30.0
+        budget = 2 * timeout + 5 + 3  # one timeout, retry, backoff, observer/load margin
+        runway = []
+        for index, (left, right) in enumerate(zip(edges, edges[1:])):
+            analysis = getattr(self, "catalog", {}).get(track_ids[index + 1], {})
+            beats = analysis.get("rhythm", {}).get("beats_seconds", [])
+            # Include executor cleanup and conservative +6% playback speed.
+            ready_beat = int(left["target_entry_beat_index"]) + int(left["transition_bars"]) * 4 + 8
+            exit_beat = int(right["source_exit_beat_index"])
+            if 0 <= ready_beat < len(beats) and 0 <= exit_beat < len(beats):
+                runway.append(max(0.0, (float(beats[exit_beat]) - float(beats[ready_beat])) / 1.06))
+        minimum = min(runway) if runway else None
+        return {
+            "budgetSeconds": round(budget, 1),
+            "minimumRunwaySeconds": round(minimum, 1) if minimum is not None else None,
+            "status": "unknown" if len(runway) != len(edges) - 1 or not runway
+                      else "sufficient" if minimum >= budget else "at_risk",
+        }
 
     def _preserves_shifted_three_transition_window(
         self,
@@ -1185,7 +1462,7 @@ class LiveStateStore:
         return any(
             int(row["transitions"][0]["source_exit_beat_index"])
             >= minimum_next_exit
-            for row in build_three_transition_candidates(shifted_pairings)
+            for row in build_three_transition_candidates(shifted_pairings, limit=None)
         )
 
     def _edge_preserves_future_window(
@@ -1212,7 +1489,7 @@ class LiveStateStore:
         return any(
             int(candidate["transitions"][0]["source_exit_beat_index"])
             >= minimum_exit
-            for candidate in build_three_transition_candidates(shifted_pairings)
+            for candidate in build_three_transition_candidates(shifted_pairings, limit=None)
         )
 
     def _plan_from_buffer_edge(
@@ -1280,6 +1557,7 @@ class LiveStateStore:
                 "standbyReady": True,
                 "selectedBy": "meta",
                 "reason": "Preserved inside the single three-transition Meta plan.",
+                "metaOrigin": self.selection.get("meta_origin"),
                 "sourceExitBeat": int(edge["source_exit_beat_index"]),
                 "targetEntryBeat": int(edge["target_entry_beat_index"]),
                 "bars": int(edge["transition_bars"]),
@@ -1287,7 +1565,7 @@ class LiveStateStore:
 
     def _plan_three_transition_buffer(
         self,
-        track_ids: tuple[str, str, str, str],
+        track_ids: tuple[str, ...],
         candidates: list[dict[str, Any]],
         source_deck: int,
         target_deck: int,
@@ -1300,11 +1578,13 @@ class LiveStateStore:
         }
         load_dotenv(BACKEND_ROOT.parent / ".env")
         load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+        meta_call = None
         try:
             config = MetaConfig.from_environment()
+            meta_call = self._begin_meta_call(config, track_ids, "current_plan")
             self._append_system_event(
                 "Meta API request started",
-                f"Calling {config.model} once to select one plan containing three transitions.",
+                f"Calling {config.model} once to select one plan containing {len(track_ids) - 1} transitions.",
             )
             selection = select_with_meta(
                 candidates,
@@ -1312,9 +1592,11 @@ class LiveStateStore:
                 intent="maintain_energy",
                 track_ids=track_ids,
                 model=config.model,
-                transport=OpenAICompatibleTransport(config),
+                transport=self._meta_transport(config, meta_call),
             )
+            self._finish_meta_call(meta_call)
         except Exception as error:
+            self._finish_meta_call(meta_call, error)
             self.transition_overrides[edge_key] = {
                 "status": "needs_human",
                 "standbyReady": False,
@@ -1334,7 +1616,8 @@ class LiveStateStore:
             target_deck,
         )
         plan = compiled["next_executable_plan"]
-        self.selection = compiled
+        self._stamp_meta_origin(compiled, meta_call)
+        self._set_selection(compiled)
         self.envelope = None
         self.supervisor = None
         self.transition_overrides[edge_key] = {
@@ -1346,11 +1629,11 @@ class LiveStateStore:
         self._restore_transition_buffer_overrides()
         self._write_dashboard_selection(compiled)
         self._append_system_event(
-            "Three-transition Meta plan ready",
+            "Meta transition window ready",
             (
                 f"{config.model} selected candidate "
                 f"{selection.candidate['candidate_id']} in one API call: "
-                "A→B, B→C, and C→D are preserved in one plan."
+                f"{len(track_ids) - 1} transitions are preserved in one plan."
             ),
         )
         return 200, {
@@ -1360,13 +1643,13 @@ class LiveStateStore:
             "model": config.model,
             "candidate_count": selection.candidate_count,
             "plan_id": plan["plan_id"],
-            "transition_count": 3,
-            "message": "One Meta plan now contains three ready transitions.",
+            "transition_count": len(track_ids) - 1,
+            "message": f"One Meta plan now contains {len(track_ids) - 1} ready transitions.",
         }
 
     def _compile_three_transition_candidate(
         self,
-        track_ids: tuple[str, str, str, str],
+        track_ids: tuple[str, ...],
         selection: Any,
         model: str,
         source_deck: int,
@@ -1399,14 +1682,14 @@ class LiveStateStore:
             "intent": selection.decision.intent,
             "model": model,
             "planning_window_track_ids": list(track_ids),
-            "planning_mode": "rolling_abcd",
+            "planning_mode": "rolling_abcd" if len(track_ids) == 4 else "rolling_tail",
             "model_decision": selection.decision.to_dict(),
             "selected_candidate": selection.candidate,
             "transition_buffer": transition_buffer,
             "next_executable_plan": plan,
             "following_feasible_draft": self._draft_from_buffer_edge(
                 transition_buffer[1]
-            ),
+            ) if len(transition_buffer) > 1 else None,
         }
 
     def _plan_clean_break(
@@ -1443,14 +1726,16 @@ class LiveStateStore:
         }
         load_dotenv(BACKEND_ROOT.parent / ".env")
         load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+        meta_call = None
         try:
             config = MetaConfig.from_environment()
+            meta_call = self._begin_meta_call(config, (source_id, target_id), "current_plan")
             pair, confidence, reason = select_clean_break_with_meta(
                 future,
                 queue_revision=int(self.queue["revision"]),
                 source_id=source_id,
                 target_id=target_id,
-                transport=OpenAICompatibleTransport(config),
+                transport=self._meta_transport(config, meta_call),
             )
             plan = compile_clean_break_plan(
                 source_id=source_id,
@@ -1462,7 +1747,9 @@ class LiveStateStore:
                 target_deck=target_deck,
                 model=config.model,
             )
+            self._finish_meta_call(meta_call)
         except Exception as error:
+            self._finish_meta_call(meta_call, error)
             latest_match = find_track_deck(self.raw_performance, source_id)
             latest_beat = (
                 int(latest_match[1].beat_index)
@@ -1527,7 +1814,9 @@ class LiveStateStore:
             "selected_candidate": pair,
             "next_executable_plan": plan,
         }
-        self.selection = compiled
+        if config is not None:
+            self._stamp_meta_origin(compiled, meta_call)
+        self._set_selection(compiled)
         self.envelope = None
         self.supervisor = None
         selected_by = "meta" if config is not None else "deterministic_fallback"
@@ -1554,284 +1843,22 @@ class LiveStateStore:
         }
 
     def _maintain_ready_buffer(self) -> bool:
-        """Plan the next three-track window independently from arm approval."""
-        plan = self.selection.get("next_executable_plan")
-        if not isinstance(plan, dict):
-            return False
-        target = plan.get("deck_b")
-        if not isinstance(target, dict) or not target.get("audio_sha256"):
-            return False
-        return self._schedule_lookahead(str(target["audio_sha256"]))
-
-    def _schedule_lookahead(self, source_id: str) -> bool:
-        """Start at most one background Meta request for a future source track."""
+        """Use the same future-window scheduler before and after promotion."""
         if not getattr(self, "continuous_set_active", False):
             return False
-        queue_ids = [str(value) for value in self.queue["ordered_track_ids"]]
-        if source_id not in queue_ids or queue_ids.index(source_id) + 2 >= len(queue_ids):
+        if getattr(self, "auto_arm_enabled", False) and self.supervisor is None:
+            # Auto rotation arms immediately after promotion and assigns a fresh
+            # execution ID. Let request_arm schedule against that committed ID,
+            # rather than starting a request that arm will instantly invalidate.
             return False
-        buffered_ids = (
-            [str(value) for value in self.buffered_meta_plan.get("track_ids", [])]
-            if isinstance(self.buffered_meta_plan, dict)
-            else []
-        )
-        if buffered_ids and buffered_ids[0] == source_id:
+        # Observer callbacks must continue draining MIDI during foreground Meta
+        # inference; missing this tick is harmless because the next tick retries.
+        if not self.action_lock.acquire(blocking=False):
             return False
-        if source_id in self.lookahead_in_progress:
-            return False
-        self.lookahead_in_progress.add(source_id)
-        threading.Thread(
-            target=self._plan_lookahead_worker,
-            args=(source_id,),
-            name=f"idj-meta-lookahead-{source_id[:8]}",
-            daemon=True,
-        ).start()
-        return True
-
-    def _plan_lookahead_worker(self, source_id: str) -> None:
-        """Keep one Meta-selected transition ahead of the executable plan."""
         try:
-            with self.action_lock:
-                queue_ids = [
-                    str(value) for value in self.queue["ordered_track_ids"]
-                ]
-                if source_id not in queue_ids:
-                    return
-                source_index = queue_ids.index(source_id)
-                if source_index + 2 >= len(queue_ids):
-                    return
-                target_id, following_id = queue_ids[
-                    source_index + 1 : source_index + 3
-                ]
-                active_plan = self.selection.get("next_executable_plan", {})
-                active_target = active_plan.get("deck_b", {})
-                source_entry_beat = (
-                    int(active_target.get("cue_beat_index", -1))
-                    if active_target.get("audio_sha256") == source_id
-                    else -1
-                )
-                immediate = self.transition_pipeline.cache.payload(
-                    source_id, target_id
-                )
-                following = self.transition_pipeline.cache.payload(
-                    target_id, following_id
-                )
-                queue_revision = int(self.queue["revision"])
-                load_dotenv(BACKEND_ROOT.parent / ".env")
-                load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
-                config = MetaConfig.from_environment()
-                transport = OpenAICompatibleTransport(config)
-                self._append_system_event(
-                    "Rolling Meta request started",
-                    f"Calling {config.model} for the legacy lookahead window.",
-                )
-
-                def rolling_transport(system: str, user: str) -> str:
-                    try:
-                        return transport(system, user)
-                    except TimeoutError:
-                        self._append_system_event(
-                            "Rolling Meta response delayed",
-                            (
-                                "The first lookahead request timed out; retrying once. "
-                                "The already-armed transition remains under local control."
-                            ),
-                        )
-                        return transport(system, user)
-
-            # Do not hold the action lock during network inference: human takeover
-            # and the currently armed transition remain responsive.
-            if immediate.get("pairs") and following.get("pairs"):
-                candidates = [
-                    row
-                    for row in build_rolling_candidates(immediate, following)
-                    if int(row["a_exit_beat_index"]) > source_entry_beat + 16
-                ]
-                if not candidates:
-                    raise RuntimeError("no_buffered_rolling_candidates")
-                selected = select_with_meta(
-                    candidates,
-                    queue_revision=queue_revision,
-                    intent="maintain_energy",
-                    track_ids=(source_id, target_id, following_id),
-                    model=config.model,
-                    transport=rolling_transport,
-                )
-                buffered = {
-                    "mode": "rolling_abc",
-                    "queue_revision": queue_revision,
-                    "track_ids": [source_id, target_id, following_id],
-                    "candidate": selected.candidate,
-                    "decision": selected.decision.to_dict(),
-                    "model": config.model,
-                }
-            elif immediate.get("clean_break_pairs"):
-                candidates = [
-                    row
-                    for row in immediate["clean_break_pairs"]
-                    if int(row["a_exit"]["beat_index"])
-                    > source_entry_beat + 16
-                ]
-                if not candidates:
-                    raise RuntimeError("no_buffered_clean_break_candidates")
-                pair, confidence, reason = select_clean_break_with_meta(
-                    candidates,
-                    queue_revision=queue_revision,
-                    source_id=source_id,
-                    target_id=target_id,
-                    transport=rolling_transport,
-                )
-                buffered = {
-                    "mode": "pair_clean_break",
-                    "queue_revision": queue_revision,
-                    "track_ids": [source_id, target_id, following_id],
-                    "candidate": pair,
-                    "decision": {
-                        "intent": "clean_break",
-                        "use_bass_swap": False,
-                        "confidence": confidence,
-                        "reason": reason,
-                    },
-                    "model": config.model,
-                }
-            else:
-                raise RuntimeError("lookahead_pair_has_no_supported_candidates")
-
-            with self.action_lock:
-                latest_ids = [
-                    str(value) for value in self.queue["ordered_track_ids"]
-                ]
-                if not self.continuous_set_active:
-                    return
-                if (
-                    int(self.queue["revision"]) != queue_revision
-                    or latest_ids[source_index : source_index + 3]
-                    != [source_id, target_id, following_id]
-                ):
-                    raise RuntimeError("lookahead_queue_changed_during_meta_call")
-                self.buffered_meta_plan = buffered
-                if buffered["mode"] == "rolling_abc":
-                    source_exit_beat = int(buffered["candidate"]["a_exit_beat_index"])
-                    target_entry_beat = int(buffered["candidate"]["b_entry_beat_index"])
-                    transition_bars = int(buffered["candidate"]["ab_transition_bars"])
-                else:
-                    source_exit_beat = int(buffered["candidate"]["a_exit"]["beat_index"])
-                    target_entry_beat = int(buffered["candidate"]["b_entry"]["beat_index"])
-                    transition_bars = 0
-                self.transition_overrides[(source_id, target_id)] = {
-                    "status": "ready",
-                    "standbyReady": True,
-                    "selectedBy": "meta",
-                    "reason": (
-                        "Meta selected this future transition before the source "
-                        "track started; the buffer is ready but not armed."
-                    ),
-                    "sourceExitBeat": source_exit_beat,
-                    "targetEntryBeat": target_entry_beat,
-                    "bars": transition_bars,
-                }
-                self._append_system_event(
-                    "Rolling Meta buffer replenished",
-                    (
-                        f"{source_id[:8]} → {target_id[:8]} is planned before "
-                        f"{source_id[:8]} becomes the live source."
-                    ),
-                )
-        except Exception as error:
-            self._append_system_event(
-                "Rolling Meta buffer unavailable",
-                f"{type(error).__name__}: {error}",
-            )
+            return self._schedule_future_transition_plan()
         finally:
-            self.lookahead_in_progress.discard(source_id)
-
-    def _promote_buffered_meta_plan(
-        self,
-        source_id: str,
-        target_id: str,
-        source_deck: int,
-        target_deck: int,
-        live_beat: int,
-    ) -> tuple[int, dict[str, Any]] | None:
-        buffered = self.buffered_meta_plan
-        if not isinstance(buffered, dict):
-            return None
-        track_ids = [str(value) for value in buffered.get("track_ids", [])]
-        if (
-            buffered.get("queue_revision") != int(self.queue["revision"])
-            or track_ids[:2] != [source_id, target_id]
-        ):
-            return None
-        candidate = buffered["candidate"]
-        mode = str(buffered["mode"])
-        exit_beat = int(
-            candidate["a_exit_beat_index"]
-            if mode == "rolling_abc"
-            else candidate["a_exit"]["beat_index"]
-        )
-        if exit_beat <= live_beat + 16:
-            self.buffered_meta_plan = None
-            return None
-
-        model = str(buffered["model"])
-        decision = dict(buffered["decision"])
-        if mode == "rolling_abc":
-            compiled = self._compile_meta_selection(
-                (track_ids[0], track_ids[1], track_ids[2]),
-                candidate,
-                decision,
-                model,
-                source_deck,
-                target_deck,
-            )
-        else:
-            plan = compile_clean_break_plan(
-                source_id=source_id,
-                target_id=target_id,
-                pair=candidate,
-                catalog=self.analysis_catalog,
-                queue_revision=int(self.queue["revision"]),
-                source_deck=source_deck,
-                target_deck=target_deck,
-                model=model,
-            )
-            compiled = {
-                "schema_version": 1,
-                "selection": "meta_buffered_clean_break_promotion",
-                "source_window_id": (
-                    f"buffer-q{self.queue['revision']}-{source_id[:8]}-{target_id[:8]}"
-                ),
-                "queue_revision": int(self.queue["revision"]),
-                "intent": "clean_break",
-                "model": model,
-                "planning_window_track_ids": track_ids,
-                "planning_mode": "promoted_rolling_draft",
-                "model_decision": decision,
-                "selected_candidate": candidate,
-                "next_executable_plan": plan,
-            }
-        self.buffered_meta_plan = None
-        self.selection = compiled
-        self.envelope = None
-        self.supervisor = None
-        self.transition_overrides[(source_id, target_id)] = {
-            "status": "ready",
-            "standbyReady": True,
-            "selectedBy": "meta",
-            "reason": "Promoted from the rolling Meta buffer without a new model call.",
-        }
-        self._restore_following_override()
-        self._write_dashboard_selection(compiled)
-        self._maintain_ready_buffer()
-        return 200, {
-            "accepted": True,
-            "status": "ready",
-            "selected_by": "meta",
-            "model": model,
-            "model_called": False,
-            "plan_id": compiled["next_executable_plan"]["plan_id"],
-            "message": "Buffered Meta plan promoted locally; no cue-time model wait.",
-        }
+            self.action_lock.release()
 
     def _promote_following_draft(
         self,
@@ -1907,9 +1934,10 @@ class LiveStateStore:
                 "reason": "Promoted the B→C leg preserved by the earlier Meta A–B–C decision.",
             },
             "selected_candidate": dict(draft),
+            "meta_origin": self.selection.get("meta_origin"),
             "next_executable_plan": plan,
         }
-        self.selection = compiled
+        self._set_selection(compiled)
         self.envelope = None
         self.supervisor = None
         self.transition_overrides[(source_id, target_id)] = {
@@ -1965,17 +1993,21 @@ class LiveStateStore:
         compiled = deepcopy(self.selection)
         compiled["selection"] = "meta_transition_buffer_shift"
         compiled["transition_buffer"] = shifted
+        compiled["planning_mode"] = "rolling_abcd" if len(shifted) == 3 else "rolling_tail"
         compiled["planning_window_track_ids"] = [
             shifted[0]["source_track_id"],
             *[item["target_track_id"] for item in shifted],
         ]
+        compiled.setdefault("selected_candidate", {})["refill_timing"] = self._window_refill_timing(
+            shifted, compiled["planning_window_track_ids"],
+        )
         compiled["next_executable_plan"] = plan
         compiled["following_feasible_draft"] = (
             self._draft_from_buffer_edge(shifted[1])
             if len(shifted) > 1
             else None
         )
-        self.selection = compiled
+        self._set_selection(compiled)
         self.envelope = None
         self.supervisor = None
         self.transition_overrides[(source_id, target_id)] = {
@@ -1986,6 +2018,7 @@ class LiveStateStore:
         }
         self._restore_transition_buffer_overrides()
         self._write_dashboard_selection(compiled)
+        self._maintain_ready_buffer()
         return 200, {
             "accepted": True,
             "status": "ready",
@@ -2038,7 +2071,7 @@ class LiveStateStore:
             or plan["deck_b"]["audio_sha256"] != target_id
         ):
             return 409, {"error": "live_recovery_identity_mismatch"}
-        self.selection = recovered
+        self._set_selection(recovered)
         self.envelope = None
         self.supervisor = None
         self.transition_overrides[(source_id, target_id)] = {
@@ -2087,6 +2120,7 @@ class LiveStateStore:
             "sourceExitBeat": int(draft["source_exit_beat_index"]),
             "targetEntryBeat": int(draft["target_entry_beat_index"]),
             "bars": int(draft["transition_bars"]),
+            "metaOrigin": self.selection.get("meta_origin"),
         }
 
     def _compile_meta_selection(
@@ -2337,7 +2371,7 @@ class LiveStateStore:
             return
         if self._executor_running():
             return
-        if self.envelope and self.envelope.get("status") in {"armed", "executing"}:
+        if self.envelope and self.envelope.get("status") in {"armed", "executing", "cancelled", "invalidated"}:
             return
         playing = [
             (number, deck)
@@ -2378,6 +2412,8 @@ class LiveStateStore:
 
     def _continuity_guard_worker(self, deck_number: int, track_id: str) -> None:
         try:
+            if not self.auto_arm_enabled or self._recovery_reason() or self.auto_chain_cancel.is_set():
+                return
             with self.lock:
                 performance = self.raw_performance
             if performance is None:
@@ -2425,6 +2461,8 @@ class LiveStateStore:
                 ):
                     raise RuntimeError("emergency_next_track_identity_mismatch")
 
+            if not self.auto_arm_enabled or self._recovery_reason() or self.auto_chain_cancel.is_set():
+                return
             with mido.open_output(port_name()) as output:
                 send_sync_value(output, target_deck, "enabled", False)
                 send_value(output, str(target_deck), "rate", 0.0)
@@ -2439,6 +2477,8 @@ class LiveStateStore:
                 send_value(output, str(deck_number), "play", 0.0)
 
             self.current_track_id = next_track_id
+            self._set_selection({})
+            self.future_transition_plan = None
             self.supervisor = None
             self.envelope = None
             self.auto_chain_started_for.clear()
@@ -2532,10 +2572,10 @@ class LiveStateStore:
             with self.action_lock:
                 if str((self.envelope or {}).get("plan_id")) != invalidated_plan_id:
                     return
-                self.selection = {}
-                self.buffered_meta_plan = None
+                self._set_selection({})
                 self.future_transition_plan = None
-                self.future_plan_in_progress = False
+                self.transition_overrides.clear()
+                self._seed_standby_overrides()
                 self.supervisor = None
                 self.envelope = None
             status, payload = self.request_meta_plan()
@@ -2728,6 +2768,9 @@ class LiveStateStore:
         ):
             plan_status = str(self.envelope.get("status", "ready"))
             invalidation_reason = self.envelope.get("invalidation_reason")
+        if plan_status == "ready" and self._recovery_reason():
+            plan_status = "invalidated"
+            invalidation_reason = self._recovery_reason()
         source = str(plan_payload.get("source", ""))
         selected_by = (
             "deterministic_fallback"
@@ -2828,13 +2871,9 @@ class LiveStateStore:
                 )
             ),
             "activeTransitionLocked": plan_status in {"armed", "executing"},
-            "futurePlanStatus": (
-                "ready"
-                if self.future_transition_plan is not None
-                else "planning"
-                if self.future_plan_in_progress
-                else "idle"
-            ),
+            "metaOrigin": self.selection.get("meta_origin") if selected_by == "meta" else None,
+            **self._planning_activity(),
+            "refillTiming": self.selection.get("selected_candidate", {}).get("refill_timing"),
             "futurePlanningWindowTrackIds": [
                 str(track_id) for track_id in future_window_ids
             ],
@@ -2867,6 +2906,10 @@ class LiveStateStore:
                 edge.source_track_id == plan["sourceTrackId"]
                 and edge.target_track_id == plan["targetTrackId"]
             ):
+                # Active overrides are replaced on promotion. Always project
+                # timing/provenance from the actual executable plan, not an old
+                # future-window override for the same pair.
+                payload.update(self._active_edge_details(plan))
                 if plan_status in {"draft", "ready", "armed", "executing"}:
                     payload["status"] = (
                         "ready" if plan_status in {"draft", "ready"} else plan_status
@@ -2906,6 +2949,7 @@ class LiveStateStore:
             self.envelope = self._load_envelope()
             self._maybe_schedule_human_replan()
             self._maybe_start_auto_chain()
+        self._maintain_ready_buffer()
         self._maybe_start_continuity_guard(performance)
 
 
@@ -2980,6 +3024,10 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/arm":
                 status, payload = store.request_arm()
+                self._json(status, payload)
+                return
+            if self.path == "/api/recover":
+                status, payload = store.request_recover()
                 self._json(status, payload)
                 return
             if self.path == "/api/auto-arm":

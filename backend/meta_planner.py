@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import re
+import math
+import time
 from typing import Any, Callable, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -31,6 +33,8 @@ transition lengths, scores, or candidate IDs. Respond with exactly one JSON
 object containing only selected_candidate_id, intent, use_bass_swap,
 confidence, and reason. The reason must be concise and grounded in supplied
 measurements.
+Local code has already checked feasibility and calculated scores. Make a brief
+comparison, select one candidate, and keep the reason to one short sentence.
 When musical scores are comparable, prefer the candidate with earlier target
 entries so the following transition retains runway. Never trade chronology for
 a higher score: every later source exit must remain after its target entry.
@@ -43,6 +47,16 @@ class MetaConfig:
     model: str = DEFAULT_META_MODEL
     api_base: str = DEFAULT_META_API_BASE
     timeout_seconds: float = 30.0
+    reasoning_effort: str = "low"
+    max_tokens: int = 2048
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("Meta timeout must be positive and finite")
+        if self.reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("invalid META_REASONING_EFFORT")
+        if self.max_tokens < 256:
+            raise ValueError("META_MAX_TOKENS must be at least 256 (includes reasoning)")
 
     @classmethod
     def from_environment(cls) -> "MetaConfig":
@@ -56,6 +70,8 @@ class MetaConfig:
                 "META_API_BASE", DEFAULT_META_API_BASE
             ).strip().rstrip("/"),
             timeout_seconds=float(os.environ.get("META_TIMEOUT_SECONDS", "30")),
+            reasoning_effort=os.environ.get("META_REASONING_EFFORT", "low"),
+            max_tokens=int(os.environ.get("META_MAX_TOKENS", "2048")),
         )
 
 
@@ -196,11 +212,24 @@ def _edge_options(
         row["planning_score"] = float(row["score"]) - float(
             row["entry_lateness_penalty"]
         )
-    return sorted(
+    ranked = sorted(
         rows,
         key=lambda row: float(row["planning_score"]),
         reverse=True,
-    )[:limit]
+    )
+    # Retain musical leaders AND timing alternatives before joint feasibility.
+    # A high-score-only cap can remove every early-entry / late-exit option.
+    selected = ranked[:limit]
+    for row in sorted(rows, key=lambda row: (
+        int(row["target_entry_beat_index"]) + int(row["transition_bars"]) * 4,
+        -int(row["source_exit_beat_index"]),
+        -float(row["planning_score"]),
+    )):
+        if row not in selected:
+            selected.append(row)
+        if len(selected) >= 2 * limit:
+            break
+    return selected
 
 
 def build_three_transition_candidates(
@@ -208,51 +237,51 @@ def build_three_transition_candidates(
     *,
     intent: Intent = "maintain_energy",
     minimum_dwell_beats: int = MINIMUM_DWELL_BEATS,
-    limit: int = MAX_MODEL_CANDIDATES,
+    limit: int | None = MAX_MODEL_CANDIDATES,
 ) -> list[dict[str, Any]]:
     """Build one A-B-C-D plan candidate containing exactly three edges."""
     if intent not in ALLOWED_INTENTS:
         raise ValueError(f"unsupported intent: {intent}")
+    return build_transition_window_candidates(
+        pairings, intent=intent, minimum_dwell_beats=minimum_dwell_beats, limit=limit
+    )
+
+
+def build_transition_window_candidates(
+    pairings: tuple[dict[str, Any], ...],
+    *,
+    intent: Intent = "maintain_energy",
+    minimum_dwell_beats: int = MINIMUM_DWELL_BEATS,
+    limit: int | None = MAX_MODEL_CANDIDATES,
+) -> list[dict[str, Any]]:
+    """Jointly plan up to three edges, including a shorter queue tail."""
+    from itertools import product
+
+    if intent not in ALLOWED_INTENTS or not 1 <= len(pairings) <= 3:
+        raise ValueError("invalid transition window")
     edge_sets = [_edge_options(pairing, intent=intent) for pairing in pairings]
-    candidates: list[dict[str, Any]] = []
-    for ab in edge_sets[0]:
-        b_minimum_exit = (
-            int(ab["target_entry_beat_index"])
-            + int(ab["transition_bars"]) * 4
-            + minimum_dwell_beats
-        )
-        for bc in edge_sets[1]:
-            if int(bc["source_exit_beat_index"]) < b_minimum_exit:
-                continue
-            c_minimum_exit = (
-                int(bc["target_entry_beat_index"])
-                + int(bc["transition_bars"]) * 4
-                + minimum_dwell_beats
-            )
-            for cd in edge_sets[2]:
-                if int(cd["source_exit_beat_index"]) < c_minimum_exit:
-                    continue
-                transitions = [
-                    {key: value for key, value in edge.items() if key != "pair"}
-                    for edge in (ab, bc, cd)
-                ]
-                identity = {"transitions": transitions}
-                candidates.append(
-                    {
-                        "candidate_id": _candidate_id(identity),
-                        "transitions": transitions,
-                        "combined_score": (
-                            0.5 * float(ab["planning_score"])
-                            + 0.3 * float(bc["planning_score"])
-                            + 0.2 * float(cd["planning_score"])
-                        ),
-                    }
-                )
-    return sorted(
-        candidates,
-        key=lambda row: float(row["combined_score"]),
-        reverse=True,
-    )[:limit]
+    candidates = []
+    for edges in product(*edge_sets):
+        if any(
+            int(right["source_exit_beat_index"])
+            < int(left["target_entry_beat_index"])
+            + int(left["transition_bars"]) * 4 + minimum_dwell_beats
+            for left, right in zip(edges, edges[1:])
+        ):
+            continue
+        transitions = [
+            {key: value for key, value in edge.items() if key != "pair"}
+            for edge in edges
+        ]
+        candidates.append({
+            "candidate_id": _candidate_id({"transitions": transitions}),
+            "transitions": transitions,
+            "combined_score": sum(
+                weight * float(edge["planning_score"])
+                for weight, edge in zip((0.5, 0.3, 0.2), edges)
+            ),
+        })
+    return sorted(candidates, key=lambda row: float(row["combined_score"]), reverse=True)[:limit]
 
 
 def build_append_candidates(
@@ -395,14 +424,17 @@ def validate_decision(
 
 
 class OpenAICompatibleTransport:
-    def __init__(self, config: MetaConfig) -> None:
+    def __init__(self, config: MetaConfig, *, on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.config = config
+        self.on_event = on_event or (lambda event: None)
 
     def __call__(self, system: str, user: str) -> str:
         body = json.dumps(
             {
                 "model": self.config.model,
                 "temperature": 0.2,
+                "reasoning_effort": self.config.reasoning_effort,
+                "max_tokens": self.config.max_tokens,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -418,15 +450,33 @@ class OpenAICompatibleTransport:
                 "Content-Type": "application/json",
             },
         )
+        started = time.monotonic()
+        self.on_event({"phase": "waiting_for_response", "requestBytes": len(body)})
         try:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                self.on_event({"phase": "reading_response", "responseHeadersSeconds": round(time.monotonic() - started, 3)})
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
             raise RuntimeError(f"Meta API returned HTTP {error.code}") from error
         except URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise TimeoutError("Meta connection timed out") from error
             raise RuntimeError(f"Meta API request failed: {error.reason}") from error
+        usage = payload.get("usage") or {}
+        self.on_event({
+            "phase": "validating_response", "responseSeconds": round(time.monotonic() - started, 3),
+            "promptTokens": usage.get("prompt_tokens"),
+            "completionTokens": usage.get("completion_tokens"),
+            "reasoningTokens": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+        })
         try:
-            return str(payload["choices"][0]["message"]["content"])
+            choice = payload["choices"][0]
+            if choice.get("finish_reason") == "length":
+                raise RuntimeError("Meta output token limit reached; no plan accepted")
+            content = choice["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError("Meta API response did not contain assistant text")
+            return content
         except (KeyError, IndexError, TypeError) as error:
             raise RuntimeError("Meta API response did not contain assistant text") from error
 

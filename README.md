@@ -53,6 +53,35 @@ separately validated local prototype.
   the latest observed beat and uses it only while sufficient arm runway
   remains. Otherwise the edge becomes `Needs human` instead of silently
   waiting or seeking backward.
+- Rolling background planning now uses one joint window of up to three future
+  transitions, replenished at promotion and retried after failures. Existing
+  valid plans remain available while planning; failures show `degraded`. Queue
+  tails use one or two edges. Synthetic ten-track regressions cover promotion,
+  timeout, stale results, and takeover.
+  A live ten-track run completed all nine transitions, but repeated Meta
+  timeouts depleted the future buffer.
+  Planning identity now survives arm's execution-ID change; actual replanning
+  advances a separate epoch. Candidate search retains timing alternatives as
+  well as musical leaders (at most 16³ local combinations, ten sent to Meta).
+  The dashboard preserves each decision's request provenance and executable
+  cues through promotion, separately from refill request failures. It exposes
+  API phase, reasoning usage, retries, buffer depth, and timing risks.
+  Low-reasoning API probes completed in 3.89–4.88 seconds; these small samples
+  do not guarantee latency. A subsequent live run completed eight handoffs with
+  eleven pre-cue seeks; all nine Meta calls succeeded in 3.23–7.43 seconds,
+  with no timeout or discard. Stopping playback cancelled the final transition.
+  A separate tail test completed the last two handoffs with two pre-cue seeks.
+  These runs do not establish uninterrupted nine-handoff acceptance for the
+  latest version or automatic recovery after seeking past a cue.
+  Restarted bridges invalidate unowned persisted plans and require replanning
+  before arm rather than trusting a saved `executing` status.
+- After a cancelled or stale transition, **Recover & arm** uses the one
+  currently playing deck and prepares only the next track in the idle deck.
+  It plans forward from the latest observed beat, then rechecks normal arm
+  preconditions. With playback stopped, **Recover from position** prepares a
+  plan without seeking or starting the source; resume it before arming.
+  Cancelled plans cannot be revived by toggling Auto arm, and the near-end
+  continuity guard stays disabled after cancellation until explicit recovery.
 - Not included here yet: a standalone public Mixxx observer/executor and
   redistributable audio fixtures.
 - The UI labels simulation data explicitly. It does not present fixture events
@@ -139,8 +168,12 @@ remained at its handoff position. No stop or cleanup command followed.
 
 Copy `.env.example` to `.env` and set `MODEL_API_KEY`. The model, compatible
 API base URL, and timeout are configured with `META_MODEL`, `META_API_BASE`,
-and `META_TIMEOUT_SECONDS`; no model name or credential is embedded in the
-planner.
+and `META_TIMEOUT_SECONDS`. `META_REASONING_EFFORT` defaults to `low` and
+`META_MAX_TOKENS` to `2048` (reasoning plus visible output). These controls use
+the documented [Meta Chat Completions reasoning API](https://dev.meta.ai/docs/reasoning).
+Truncated responses are rejected before compilation. Request metrics never
+include credentials or internal reasoning text. The timeout remains 30 seconds;
+short refill windows still show a risk instead of claiming a guaranteed buffer.
 
 The planner sends at most ten locally feasible candidates in exactly one Meta
 Model API call. The response may select a candidate and request the supported

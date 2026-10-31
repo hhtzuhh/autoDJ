@@ -64,6 +64,14 @@ export type TransitionEdgeStatus =
   | "expired"
   | "invalidated";
 
+export interface MetaOrigin {
+  requestId: string;
+  requestedAt: number;
+  selectedAt: number;
+  candidateId: string | null;
+  model: string;
+}
+
 export interface TransitionEdge {
   id: string;
   sourceTrackId: string;
@@ -77,9 +85,12 @@ export interface TransitionEdge {
   sourceExitBeat?: number;
   targetEntryBeat?: number;
   bars?: number;
+  metaOrigin?: MetaOrigin | null;
 }
 
 export interface TransitionPlan {
+  recoveryReason?: string | null;
+  metaOrigin?: MetaOrigin | null;
   id: string;
   status: LifecycleStatus;
   sourceTrackId: string;
@@ -102,9 +113,37 @@ export interface TransitionPlan {
   performanceRevision: number;
   invalidationReason: string | null;
   planningWindowTrackIds?: string[];
-  planningMode?: "pair_clean_break" | "rolling_abc" | "rolling_abcd" | "promoted_rolling_draft";
+  planningMode?: "pair_clean_break" | "rolling_abc" | "rolling_abcd" | "rolling_tail" | "promoted_rolling_draft";
   activeTransitionLocked?: boolean;
-  futurePlanStatus?: "idle" | "planning" | "ready";
+  metaCalls?: {
+    id: string;
+    scope: "future_buffer" | "current_plan";
+    model: string;
+    trackIds: string[];
+    status: "calling" | "succeeded" | "timeout" | "failed" | "discarded";
+    attempt: number;
+    startedAt: number;
+    finishedAt: number | null;
+    timeoutSeconds: number;
+    detail: string | null;
+    phase?: "preparing_request" | "waiting_for_response" | "reading_response" | "validating_response" | "finished";
+    reasoningEffort?: string;
+    maxTokens?: number;
+    responseHeadersSeconds?: number;
+    responseSeconds?: number;
+    requestBytes?: number;
+    promptTokens?: number | null;
+    completionTokens?: number | null;
+    reasoningTokens?: number | null;
+  }[];
+  refillTiming?: {
+    budgetSeconds: number;
+    minimumRunwaySeconds: number | null;
+    status: "unknown" | "sufficient" | "at_risk";
+  } | null;
+  futurePlanError?: string | null;
+  futureRetryInSeconds?: number;
+  futurePlanStatus?: "idle" | "planning" | "ready" | "degraded";
   futurePlanningWindowTrackIds?: string[];
   followingDraft?: {
     sourceTrackId: string;

@@ -316,3 +316,28 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation-duration: .001ms !important; }
 }
+
+
+.meta-activity { padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: rgba(0,0,0,.15); }
+.meta-activity__header, .meta-call__heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.meta-activity h3 { margin: 0; font-size: 14px; }
+.meta-activity__header > strong { font: 500 11px "DM Mono", monospace; }
+.meta-activity__short, .meta-activity__warning { color: var(--amber); }
+.meta-activity__full { color: var(--green); }
+.meta-activity__summary, .meta-activity__warning { font-size: 11px; line-height: 1.6; margin: 8px 0; }
+.meta-activity__summary { color: var(--muted); }
+.meta-activity__calls { padding: 0; margin: 8px 0 0; list-style: none; display: grid; gap: 8px; }
+.meta-call { padding: 10px 11px; border-left: 3px solid var(--muted); border-radius: 5px; background: rgba(255,255,255,.025); }
+.meta-call__heading strong { font-size: 12px; }
+.meta-call__heading > span { font: 500 10px "DM Mono", monospace; }
+.meta-call--calling { border-color: var(--cyan); }
+.meta-call--calling .meta-call__heading > span { color: var(--cyan); }
+.meta-call--succeeded { border-color: var(--green); }
+.meta-call--succeeded .meta-call__heading > span { color: var(--green); }
+.meta-call--timeout, .meta-call--failed { border-color: var(--amber); }
+.meta-call--timeout .meta-call__heading > span, .meta-call--failed .meta-call__heading > span { color: var(--amber); }
+.meta-call__route, .meta-call__reason { margin: 6px 0; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.meta-call__route { color: #cbd0dc; }
+.meta-call__reason { color: var(--amber); }
+.meta-call__timing { display: flex; flex-wrap: wrap; gap: 5px 12px; color: var(--muted); font: 10px "DM Mono", monospace; }
+.meta-activity details summary { cursor: pointer; margin-top: 10px; font-size: 11px; color: var(--muted); }
