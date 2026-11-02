@@ -40,7 +40,7 @@ export function MusicFeaturesDialog({open, onClose, state, disabled, onAnalyze}:
     <p className="playlist-dialog__library">Muse Spark 1.2 · {ready}/{tracks.length} descriptions ready · {eligible.length} eligible songs</p>
     <p className="flow-empty">Genre, groove, bass, instruments, vocals, harmony, arrangement and mood. Descriptions are model interpretations; BPM, beat timing and RMS remain local measurements.</p>
     <div className="library-analysis-controls"><button type="button" className="button button--primary" disabled={locked || !selected.length} onClick={() => void submit()}>{sending ? "Starting…" : b?.buildPhase === "music_features" && b.status === "analyzing" ? "Spark working…" : `Call Meta Spark (${selected.length})`}</button></div>
-    <p className="flow-section__note">Sends the entire original MP3/WAV and the experiment prompt to Meta. Uses API credits. Complete All-In-One + DSP for each selected song first. Existing matching descriptions are reused; playlist selection stays a separate action.</p>
+    <p className="flow-section__note">Sends the entire original MP3/WAV and the experiment prompt to Meta. Uses API credits. Complete All-In-One + DSP for each selected song first. Existing matching descriptions are reused; Build automatically fills any remaining descriptions before selecting songs.</p>
     <label className="library-select-all"><input ref={all} type="checkbox" checked={allSelected} disabled={locked || !eligible.length} onChange={e => setChosen(e.target.checked ? eligible.map(t => t.id) : [])} /> Select all eligible songs <span>{selected.length} selected</span></label>
     {error && <p role="alert" className="playlist-dialog__error">{error}</p>}
     {notice && <p role="status" className="playlist-dialog__notice">{notice}</p>}
@@ -59,6 +59,6 @@ export function MusicFeaturesDialog({open, onClose, state, disabled, onAnalyze}:
         {result?.rawAvailable && <a href={`http://127.0.0.1:8765/api/set-builder/music-features/${track.id}`} target="_blank" rel="noreferrer">Open raw API JSON ↗</a>}
       </article>;
     })}</div>
-    <div className="playlist-dialog__footer"><span>Descriptions are included in later playlist requests when available.</span><button type="button" className="button button--ghost" onClick={onClose}>Back to pipeline</button></div>
+    <div className="playlist-dialog__footer"><span>Build requires descriptions for every library song before selection.</span><button type="button" className="button button--ghost" onClick={onClose}>Back to pipeline</button></div>
   </dialog>;
 }

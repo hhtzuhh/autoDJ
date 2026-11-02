@@ -55,7 +55,7 @@ export function LibraryDialog({open, mode, onClose, state, disabled, disconnecte
         <button type="button" className="button button--primary" disabled={locked || !selectedIds.length} onClick={() => void analyze()}>{sending ? "Starting…" : preparing ? "Working…" : `Analyze selected (${selectedIds.length})`}</button>
         <label className="library-modal-option"><input type="checkbox" disabled checked={false} readOnly /> Modal accelerate <small>Coming soon · disabled</small></label>
       </div>
-      <p className="flow-section__note">Check the songs to analyze. Only selected songs run, one local job at a time; ready results are reused. Building a playlist later still requires the entire library to be analyzed before Meta selects songs.</p>
+      <p className="flow-section__note">Check the songs to analyze. Only selected songs run, one local job at a time; ready results are reused. Build later completes local analysis and Muse Spark descriptions for the entire library before selecting songs.</p>
       <label className="library-select-all"><input ref={selectAll} type="checkbox" checked={allSelected} disabled={locked || !rows.length} onChange={event => setChosen(event.target.checked ? rows.map(r => r.track.id) : [])} /> Select all songs <span>{selectedIds.length} / {rows.length} selected</span></label>
       {error && <p className="playlist-dialog__error" role="alert">{error}</p>}
       {b?.error && <p className="playlist-dialog__error" role="alert">{b.error}</p>}

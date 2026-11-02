@@ -202,6 +202,8 @@ export interface CopilotState {
   flowTelemetry?: LiveFlowTelemetry;
   setBuilder?: {
     selectionOnly?: boolean;
+    preserveSelectedOrder?: boolean;
+    transitionsRequested?: boolean;
     buildPhase?: "music_features" | "analysis_only" | "library_ready" | "library_analysis" | "curation" | "selection_complete" | "transitions";
     library?: PreparedTrack[];
     buildId?: string;

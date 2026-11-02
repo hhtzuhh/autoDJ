@@ -34,7 +34,8 @@
 .flow-section__heading > span { color: var(--muted); font-size: 10px; }
 .flow-section__index { color: #b9a4ec; font: 500 11px "DM Mono", monospace; }
 .flow-lane { display: grid; gap: 22px; }
-.flow-lane--prepare { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.flow-lane--prepare { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.flow-lane--prepare .flow-node:nth-child(4)::after { content: none; }
 .flow-lane--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .flow-lane--four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .flow-lane--live { grid-template-columns: repeat(5, minmax(0, 1fr)); }
@@ -125,6 +126,12 @@
 .music-result summary { cursor: pointer; color: var(--cyan); }
 .music-result pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 12px; line-height: 1.7; background: #0d0f16; padding: 15px; border-radius: 8px; }
 .music-result a { display: inline-block; color: var(--violet); margin-top: 12px; font-size: 11px; }
+.set-setup-steps { padding-left: 22px; }
+.set-setup-steps li { padding: 12px 0; font-size: 13px; }
+.set-setup-steps p { color: var(--muted); font-size: 12px; line-height: 1.65; }
+.set-setup-path { display: block; margin-top: 12px; overflow-wrap: anywhere; color: var(--cyan); font-size: 11px; user-select: all; }
+.set-setup-edge { display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 13px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.set-setup-edge small { flex-basis: 100%; color: var(--muted); }
 .flow-return { display: flex; align-items: center; gap: 8px; margin: 5px 6% 0; color: #82759b; }
 .flow-return > i { flex: 1; border-top: 1px dashed #74608388; }
 .flow-return > b { font: 500 9px "DM Mono", monospace; text-align: center; line-height: 1.6; padding: 8px 0; }
@@ -162,6 +169,8 @@
   .flow-node:not(:last-child)::after { right: -14px; font-size: 12px; }
   .flow-lane--prepare { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .flow-lane--prepare .flow-node:nth-child(3)::after { content: none; }
+  .flow-lane--prepare .flow-node:nth-child(4)::after { content: "→"; }
+  .flow-lane--prepare .flow-node:nth-child(3n)::after { content: none; }
   .flow-lane--prepare.flow-lane--four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .flow-lane--prepare.flow-lane--four .flow-node:nth-child(3)::after { content: "→"; }
   .flow-lane--prepare.flow-lane--four .flow-node:nth-child(even)::after { content: none; }

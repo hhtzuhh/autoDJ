@@ -393,6 +393,7 @@ function QueuePanel({
   onBuild,
   onReorder,
   onActivate,
+  onPrepare,
   onRetry,
   onStart,
 }: {
@@ -401,9 +402,10 @@ function QueuePanel({
   notice: string | null;
   onBuild: (prompt: string, count: number) => Promise<BuildResult>;
   onReorder: (trackIds: string[]) => Promise<void>;
-  onActivate: () => Promise<void>;
+  onActivate: () => Promise<BuildResult>;
+  onPrepare: () => Promise<BuildResult>;
   onRetry: () => Promise<void>;
-  onStart: () => Promise<void>;
+  onStart: () => Promise<BuildResult>;
 }) {
   const [prompt, setPrompt] = useState("今天幫我排 10 首 house，能量慢慢往上");
   const [count, setCount] = useState(10);
@@ -491,6 +493,9 @@ function QueuePanel({
             >
               <Icon name="spark" /><span>Build {count} tracks with Meta</span>
             </button>
+            <button className="button button--secondary" disabled={disabled || !builder || builder.queue.length < 2 || ["curating", "analyzing", "planning"].includes(builder.status)} onClick={() => void onPrepare()}>
+              Prepare transitions
+            </button>
             <button
               className="button button--secondary"
               disabled={disabled || !builder?.activationReady}
@@ -500,7 +505,7 @@ function QueuePanel({
             </button>
             <button
               className="button button--primary"
-              disabled={disabled || builder?.activation?.status !== "playlist_ready"}
+              disabled={disabled || !builder?.activationReady || builder?.activation?.status !== "playlist_ready" || state.decks.some(d => d.playing)}
               onClick={() => void onStart()}
             >
               <Icon name="play" /><span>Start set</span>
@@ -508,7 +513,7 @@ function QueuePanel({
           </div>
           <div className="set-builder__status">
             <span className={`builder-state builder-state--${builder?.status ?? "idle"}`}>
-              {builder?.status === "selected" ? "Playlist selected · transitions paused" : builder?.status === "ready" ? "Set prepared" : builder?.status ?? "idle"}
+              {builder?.status === "selected" ? "Playlist selected · prepare transitions next" : builder?.status === "ready" ? "Set prepared" : builder?.status ?? "idle"}
             </span>
             <span>{builder?.catalogCount ?? 0} local tracks</span>
             {builder?.model && <span>{builder.model}</span>}
@@ -973,7 +978,7 @@ function App() {
       });
       const payload = await response.json();
       if (!response.ok || payload.status === "error") throw new Error(payload.error ?? `Bridge returned ${response.status}`);
-      setActionNotice("Build accepted. Library analysis must complete before Meta selects and orders the playlist.");
+      setActionNotice("Build accepted. Local analysis and Muse Spark descriptions must complete for the entire library before selection.");
       return {ok: true, buildId: payload.buildId};
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1048,7 +1053,7 @@ function App() {
     }
   };
 
-  const sendSetAction = async (action: "activate" | "start") => {
+  const sendSetAction = async (action: "prepare-transitions" | "activate" | "start"): Promise<BuildResult> => {
     setActionPending(true);
     setActionNotice(null);
     try {
@@ -1057,14 +1062,16 @@ function App() {
         { method: "POST" },
       );
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.message ?? payload.error ?? `Bridge returned ${response.status}`);
-      setActionNotice(
-        action === "activate" && payload.playlist
-          ? `${payload.message} Playlist: ${payload.playlist}`
-          : payload.message ?? `${action} accepted`,
-      );
+      if (!response.ok || payload.status === "error") throw new Error(payload.message ?? payload.error ?? `Bridge returned ${response.status}`);
+      const message = action === "activate" && payload.playlist
+        ? `${payload.message} Playlist: ${payload.playlist}`
+        : payload.message ?? (action === "prepare-transitions" ? "Preparing adjacent transition candidates in the selected order." : `${action} accepted`);
+      setActionNotice(message);
+      return {ok: true, message};
     } catch (error) {
-      setActionNotice(`Rejected: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      setActionNotice(`Rejected: ${message}`);
+      return {ok: false, error: message};
     } finally {
       setActionPending(false);
     }
@@ -1109,7 +1116,7 @@ function App() {
           <button id="flow-tab" role="tab" aria-controls="flow-view" aria-selected={view === "flow"} tabIndex={view === "flow" ? 0 : -1} onClick={() => switchView("flow")}>Agent flow</button>
         </nav>
         <div id="flow-view" role="tabpanel" aria-labelledby="flow-tab" hidden={view !== "flow"}>
-          <AgentFlow state={state} webcam={webcamTelemetry} disconnected={Boolean(bridgeError) || (liveRequested && state.dataSource !== "live")} active={view === "flow"} disabled={actionPending || state.plan.status === "executing"} onBuild={buildSet} onAnalyze={analyzeLibrary} onDescribeMusic={describeMusic} />
+          <AgentFlow state={state} webcam={webcamTelemetry} disconnected={Boolean(bridgeError) || (liveRequested && state.dataSource !== "live")} active={view === "flow"} disabled={actionPending || state.plan.status === "executing"} onBuild={buildSet} onAnalyze={analyzeLibrary} onDescribeMusic={describeMusic} onSetAction={sendSetAction} />
         </div>
         <div id="control-view" role="tabpanel" aria-labelledby="control-tab" hidden={view !== "control"}>
         <section className="hero-strip">
@@ -1135,6 +1142,7 @@ function App() {
             notice={actionNotice}
             onBuild={buildSet}
             onReorder={reorderSet}
+            onPrepare={() => sendSetAction("prepare-transitions")}
             onActivate={() => sendSetAction("activate")}
             onRetry={retrySetPlanning}
             onStart={() => sendSetAction("start")}

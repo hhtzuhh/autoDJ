@@ -69,6 +69,7 @@ def prepare_activation(
         "schema_version": 1,
         "status": "playlist_ready",
         "created_at": utc_now(),
+        "builder_revision": int(builder_state["queueRevision"]),
         "queue": queue,
         "playlist_path": str(playlist_path.resolve()),
         "manifest_path": str(manifest_path.resolve()),

@@ -275,8 +275,8 @@ class SetBuilderService:
             # An interrupted standalone analysis is resumable by Analyze, never
             # by an implicit model call on bridge startup.
             self.state["buildPhase"] = "library_ready"
-        self.state["selectionOnly"] = not prepare_transitions
-        if not prepare_transitions:
+        self.state["selectionOnly"] = not (prepare_transitions or self.state.get("transitionsRequested"))
+        if self.state["selectionOnly"]:
             self.state["transitions"] = []
         if self.state["orderedTrackIds"]:
             self._schedule_current()
@@ -488,12 +488,36 @@ class SetBuilderService:
             self.catalog = catalog
             self.state = {**saved, "queueRevision": int(self.state["queueRevision"]) + 1,
                           "selectionOnly": not self.prepare_transitions,
+                          "transitionsRequested": False, "preserveSelectedOrder": False,
                           "buildPhase": "transitions" if self.prepare_transitions else "selection_complete",
                           "loadedFromSavedSet": saved_id, "analysisOrigins": {t: "cache" for t in ids},
                           "analysisRuns": {}, "trackStatuses": {t: track.analysis_status for t, track in catalog.items()},
                           "transitions": [], "error": None}
             if self.prepare_transitions:
                 self._refresh_edges()
+            self._schedule_current()
+            self._recompute_status()
+            self._persist()
+            return self.snapshot()
+
+    def prepare_selected_transitions(self) -> dict[str, Any]:
+        """Prepare candidates for the chosen order; never re-curate or start playback."""
+        with self.lock:
+            if self.queued_jobs or self.state.get("status") in {"curating", "analyzing", "planning"}:
+                raise ValueError("Wait for current preparation to finish")
+            ids = list(self.state["orderedTrackIds"])
+            if len(ids) < 2:
+                raise ValueError("Select at least two songs before preparing transitions")
+            catalog = scan_catalog(self.library_root, self.analysis_root, metadata_reader=self.metadata_reader)
+            if any(t not in catalog or catalog[t].analysis_status != "ready" for t in ids):
+                raise ValueError("Selected songs need valid local analyses; analyze or rebuild first")
+            self.catalog = catalog
+            self.state.update(selectionOnly=False, transitionsRequested=True, preserveSelectedOrder=True,
+                              buildPhase="transitions", postAnalysisPlanning="idle", error=None,
+                              queueRevision=int(self.state["queueRevision"]) + 1, transitions=[],
+                              trackStatuses={t: row.analysis_status for t, row in catalog.items()})
+            # Recheck pair cache identities even when previous edges were ready.
+            self._refresh_edges()
             self._schedule_current()
             self._recompute_status()
             self._persist()
@@ -560,6 +584,7 @@ class SetBuilderService:
         if (
             tracks_ready
             and edges_settled
+            and not self.state.get("preserveSelectedOrder")
             and any(
                 edge["status"] == "blocked" or edge.get("reason") == "clean_break_required"
                 for edge in self.state["transitions"]
@@ -596,7 +621,7 @@ class SetBuilderService:
         edges_ready = len(self.state["transitions"]) == max(0, len(ordered) - 1) and all(
             edge["status"] == "analyzed" for edge in self.state["transitions"]
         )
-        needs_post_plan = any(
+        needs_post_plan = not self.state.get("preserveSelectedOrder") and any(
             edge.get("reason") == "clean_break_required" for edge in self.state["transitions"]
         )
         post_plan_ready = self.state.get("postAnalysisPlanning") not in {"running", "failed"} and (
@@ -613,7 +638,7 @@ class SetBuilderService:
             self.state["status"] = "planning"
         elif (
             tracks_ready
-            and self.state.get("postAnalysisPlanning") in {"completed", "failed"}
+            and (self.state.get("preserveSelectedOrder") or self.state.get("postAnalysisPlanning") in {"completed", "failed"})
             and self.state["transitions"]
             and all(edge["status"] in {"analyzed", "blocked"} for edge in self.state["transitions"])
             and any(edge["status"] == "blocked" for edge in self.state["transitions"])
@@ -726,9 +751,13 @@ class SetBuilderService:
             self.catalog = scan_catalog(self.library_root, self.analysis_root, metadata_reader=self.metadata_reader)
             if count > len(self.catalog):
                 raise ValueError(f"catalog contains only {len(self.catalog)} tracks")
+            if any(row.path.suffix.lower() not in {".mp3", ".wav"} for row in self.catalog.values()):
+                raise ValueError("Build requires Muse descriptions for every song; use MP3/WAV files in the library")
             self.state["buildId"] = f"build-{time.time_ns()}"
             self.state.pop("loadedFromSavedSet", None)
             self.state.update(buildPhase="library_analysis", requestedCount=count,
+                              selectionOnly=not self.prepare_transitions, transitionsRequested=False,
+                              preserveSelectedOrder=False,
                               analysisTrackIds=list(self.catalog), orderedTrackIds=[], transitions=[],
                               reason=None, model=None, postAnalysisPlanning="idle")
             self.state["trackStatuses"] = {t: row.analysis_status for t, row in self.catalog.items()}
@@ -742,9 +771,33 @@ class SetBuilderService:
             if pending:
                 for track_id in pending:
                     self._enqueue(("track", track_id))
-                self._enqueue(("curate", self.state["buildId"]))
+                self._enqueue(("prepare_music", self.state["buildId"]))
                 return self.snapshot()
-        return self._curate_analyzed_catalog(self.state["buildId"])
+        return self._prepare_music_for_build(self.state["buildId"])
+
+    def _prepare_music_for_build(self, build_id: str) -> dict[str, Any]:
+        """All local analysis must succeed before any missing audio descriptions run."""
+        with self.lock:
+            if self.state.get("buildId") != build_id:
+                return self.snapshot()
+            ids = self.state["analysisTrackIds"]
+            if self.state.get("error") or any(self.state["trackStatuses"].get(t) != "ready" for t in ids):
+                self.state["error"] = self.state.get("error") or "Library analysis is incomplete; Muse and selection were not called"
+                self._recompute_status(); self._persist()
+                return self.snapshot()
+            # Revalidate persisted descriptions against the current model/prompt cache key.
+            self.music_results = {t: self.music_extractor.load(t) for t in self.catalog}
+            pending = [t for t in ids if self.music_results[t].get("status") != "ready"]
+            self.state["buildPhase"] = "music_features"
+            for track_id in pending:
+                self.music_results[track_id] = {"status": "queued", "model": "muse-spark-1.2", "origin": "pending"}
+            self._recompute_status(); self._persist()
+            if pending:
+                for track_id in pending:
+                    self._enqueue(("music", track_id))
+                self._enqueue(("curate", build_id))
+                return self.snapshot()
+        return self._curate_analyzed_catalog(build_id)
 
     def _curate_analyzed_catalog(self, build_id: str) -> dict[str, Any]:
         with self.lock:
@@ -753,6 +806,10 @@ class SetBuilderService:
             ids = self.state["analysisTrackIds"]
             if self.state.get("error") or any(self.state["trackStatuses"].get(t) != "ready" for t in ids):
                 self.state["error"] = self.state.get("error") or "Library analysis is incomplete; Meta selection was not called"
+                self._recompute_status(); self._persist()
+                return self.snapshot()
+            if any(self.music_results.get(t, {}).get("status") != "ready" or not self.music_results[t].get("content") for t in ids):
+                self.state["error"] = "Muse music descriptions are incomplete; Meta selection was not called"
                 self._recompute_status(); self._persist()
                 return self.snapshot()
             candidates = []
@@ -869,6 +926,8 @@ class SetBuilderService:
                     self._work_post_plan()
                 elif job[0] == "curate":
                     self._curate_analyzed_catalog(job[1])
+                elif job[0] == "prepare_music":
+                    self._prepare_music_for_build(job[1])
                 elif job[0] == "analysis_done":
                     self._finish_library_analysis()
                 elif job[0] == "music":

@@ -5,13 +5,15 @@ import time
 import unittest
 
 from set_builder import SetBuilderService, curate_with_meta, sha256_file
-from test_set_builder import metadata
+from test_set_builder import metadata, write_music_result
 
 
 class AnalyzeBeforeCurateTest(unittest.TestCase):
     def library(self, root, count=5):
         folder=root/'local-assets/samples';folder.mkdir(parents=True)
-        for i in range(count): (folder/f'track-{i}.wav').write_bytes(f'synthetic-{i}'.encode())
+        for i in range(count):
+            song=folder/f'track-{i}.wav';song.write_bytes(f'synthetic-{i}'.encode())
+            write_music_result(root,sha256_file(song))
 
     def analyze(self, root, track):
         output=root/'artifacts/time-map'/track.id/'track-analysis-v1.json'

@@ -57,15 +57,15 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
   const preparation = [
     node("library", "Local library", "FILES + METADATA", b ? "done" : "idle", b ? `${b.catalogCount} tracks available` : "Waiting for library",
       "Reads local audio identities and file tags. Unknown genres remain unknown.", {catalogCount: b?.catalogCount ?? null, fields: ["title", "artist", "genre", "duration", "known BPM", "analysis status"]}),
-    node("curation", "Select & order", "META · MUSE SPARK", preparing ? "running" : b?.error ? "error" : b?.buildPhase === "library_analysis" ? "waiting" : curation?.status === "failed" || curation?.status === "truncated" ? "error" : selectedTracks.length ? "done" : "idle",
-      preparing ? "Selecting tracks…" : b?.error ? "Build blocked" : b?.buildPhase === "library_analysis" ? "Waiting for library analysis" : selectedTracks.length ? `${selectedTracks.length} tracks selected` : "Build / choose playlist",
-      "Meta receives the analyzed library: measured BPM, structure and DSP summaries. Genre is from file tags; relative energy is not a cross-song energy ranking.", {request: b?.prompt, reason: b?.reason, call: curation ?? null, error: b?.error, selected: selectedTracks.map(t => t.title)}),
+    node("curation", "Select & order", "META · MUSE SPARK", preparing ? "running" : b?.error ? "error" : ["library_analysis", "music_features"].includes(b?.buildPhase ?? "") ? "waiting" : curation?.status === "failed" || curation?.status === "truncated" ? "error" : selectedTracks.length ? "done" : "idle",
+      preparing ? "Selecting tracks…" : b?.error ? "Build blocked" : b?.buildPhase === "music_features" ? "Waiting for Muse descriptions" : b?.buildPhase === "library_analysis" ? "Waiting for library analysis" : selectedTracks.length ? `${selectedTracks.length} tracks selected` : "Build / choose playlist",
+      "Meta receives the analyzed library: measured BPM, structure and DSP summaries. All songs must also have Muse descriptions, kept separate from file tags and measured DSP. Relative energy is not a cross-song energy ranking.", {request: b?.prompt, reason: b?.reason, call: curation ?? null, error: b?.error, selected: selectedTracks.map(t => t.title)}),
     node("analysis", "Analyze library", "ALL-IN-ONE + LOCAL DSP", failedTracks.length ? "error" : runningTracks.length ? "running" : readyTracks.length && readyTracks.length === tracks.length ? "done" : tracks.length ? "waiting" : "idle",
       runningTracks.length ? `${runningTracks.length} analyzing · ${readyTracks.length}/${tracks.length} ready` : `${readyTracks.length}/${tracks.length} ready${cached ? ` · ${cached} cached` : ""}${available ? ` · ${available} existing metadata` : ""}`,
       `Beat grid, structure, bar features and cue candidates. ${cached} metadata results reused in the recorded build; ${available} already available without original run history; ${computed} pipeline results computed. See the track table for confirmed neural inference versus internal cache reuse.`,
       tracks.map(t => ({track: t.title, status: t.analysisStatus, origin: t.analysisOrigin ?? "unknown", bpm: t.bpm, analysisSummary: t.analysisSummary}))),
-    node("pairs", "Find transitions", "LOCAL PAIR ANALYZER", preparing ? "waiting" : blockedEdges.length ? "error" : edges.some(e => e.status === "analyzing") ? "running" : edges.length && readyEdges.length === edges.length ? "done" : tracks.length ? "waiting" : "idle",
-      `${readyEdges.length}/${edges.length} pairs ready${blockedEdges.length ? ` · ${blockedEdges.length} blocked` : ""}`,
+    node("pairs", "Prepare transitions", "LOCAL PAIR ANALYZER", preparing ? "waiting" : blockedEdges.length ? "error" : edges.some(e => e.status === "analyzing") ? "running" : edges.length && readyEdges.length === edges.length ? "done" : selectedTracks.length ? "waiting" : "idle",
+      `${readyEdges.length}/${Math.max(0, selectedTracks.length - 1)} pairs ready${blockedEdges.length ? ` · ${blockedEdges.length} blocked` : ""}`,
       "Tests adjacent entry/exit candidates, energy and bass overlap. Analyzed candidates are not yet executable Meta plans.", edges.map(e => ({source: e.sourceTrackId, target: e.targetTrackId, status: e.status, candidates: e.candidateCount, reason: e.reason}))),
     node("refine", "Refine the order", "META · WHEN NEEDED", preparing ? "waiting" : post === "failed" ? "error" : post === "running" ? "running" : post === "completed" ? "done" : !postRequired && edges.length && readyEdges.length === edges.length ? "skipped" : tracks.length ? "waiting" : "idle",
       post === "failed" ? "Planning failed" : post === "running" ? "Reordering from measured BPM…" : post === "completed" ? "Order validated" : !postRequired && edges.length && readyEdges.length === edges.length ? "Not required" : "Waiting for pair analysis",
@@ -74,14 +74,20 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
       telemetry?.activationInProgress ? "Loading & verifying set…" : b?.activation ? "Playlist exported" : b?.activationReady ? "Ready to export" : "Waiting for prepared set",
       "Writes the Mixxx playlist. Open it and select the first row, then Start set. Exporting does not play audio.", b?.activation ? {status: b.activation.status, queueRevision: b.activation.queueRevision, trackCount: b.activation.trackCount} : null),
   ];
-  // Analysis precedes curation; this branch deliberately ends at selected order.
+  // Analysis precedes curation; transition preparation is a separate user action.
   [preparation[1], preparation[2]] = [preparation[2], preparation[1]];
-  if (b?.selectionOnly) preparation.splice(3);
+  if (b?.selectionOnly || b?.preserveSelectedOrder) preparation.splice(4, 1);
   preparation.splice(2, 0, node("music", "Muse Spark music features", "META · MUSE SPARK 1.2",
     musicRunning.length || musicQueued.length ? "running" : musicFailed.length ? "error" : tracks.length && musicReady.length === tracks.length ? "done" : tracks.length ? "waiting" : "idle",
     `${musicReady.length}/${tracks.length} ready${musicRunning.length ? ` · ${musicRunning.length} calling` : ""}${musicQueued.length ? ` · ${musicQueued.length} queued` : ""}${musicFailed.length ? ` · ${musicFailed.length} failed` : ""}`,
-    "Explicit audio requests for selected songs after local analysis. Genre, groove, bass, instruments, vocals, harmony, arrangement and mood are unverified model interpretations. Ready descriptions are included in later playlist selection; missing ones remain unknown.",
+    "Explicit audio requests for selected songs after local analysis. Genre, groove, bass, instruments, vocals, harmony, arrangement and mood are unverified model interpretations. Build fills missing descriptions after local analysis and blocks selection until every song succeeds.",
     tracks.map(t => ({track: t.title, result: t.musicFeatures ?? null}))));
+  const selectedSetPlaying = fresh && telemetry?.continuousSetActive && selectedTracks.length > 1
+    && selectedTracks.every((t, i) => state.queue[i]?.id === t.id) && state.decks.some(d => d.playing);
+  preparation.push(node("start", "Start set", "META PLAN + MIXXX", telemetry?.activationInProgress ? "running" : selectedSetPlaying ? "done" : b?.activation ? "waiting" : "idle",
+    telemetry?.activationInProgress ? "Loading / planning first handoff…" : selectedSetPlaying ? "Selected set playing" : b?.activation ? "Open playlist in Mixxx, then start" : "Waiting for playlist export",
+    "Start verifies song identities, requests the initial Meta plan and only then starts audio. Auto arm controls whether subsequent handoffs need human approval.",
+    {exported: b?.activation ?? null, autoArm: state.autoArmEnabled, continuousSetActive: telemetry?.continuousSetActive}));
   if (!live || !state.connected || disconnected) preparation.forEach(n => {n.status = "stale"; n.label = !live ? "No live preparation data" : "Last known · disconnected";});
   const p = state.plan;
   const planningCalls = p.metaCalls ?? [];

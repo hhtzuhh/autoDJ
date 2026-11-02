@@ -63,11 +63,12 @@ class MusicFeaturesTest(unittest.TestCase):
             self.assertEqual(result['status'],'ready');self.assertEqual(result['usage']['total_tokens'],50)
             self.assertEqual(service.music_extractor.raw_response(ids[0]),json.loads(response()))
             self.assertEqual([t['musicFeatures']['status'] for t in service.snapshot()['library']],['ready','pending','pending'])
-            service.build('two songs',2)
+            service.build('two songs',2);wait(service)
             self.assertEqual(len(curations),1)
             self.assertFalse(curations[0][0].music_features['verified'])
             self.assertEqual(curations[0][0].music_features['description'],result['content'])
-            self.assertIsNone(curations[0][1].music_features)
+            self.assertTrue(all(t.music_features for t in curations[0]))
+            self.assertEqual(len(requests),3)
 
     def test_cache_survives_restart_without_another_api_call(self):
         with TemporaryDirectory() as raw:
@@ -138,3 +139,69 @@ class MusicFeaturesTest(unittest.TestCase):
         store.set_builder.describe_music.return_value={'status':'analyzing'}
         self.assertEqual(store.request_music_features({'trackIds':['a']})[0],202)
         store.set_builder.describe_music.assert_called_once_with(['a'])
+
+    def test_build_finishes_all_local_analysis_before_music_then_selects(self):
+        with TemporaryDirectory() as raw:
+            root=Path(raw);events=[]
+            def transport(payload):
+                self.assertEqual(len([x for x in events if x=='local']),3)
+                events.append('music');return response()
+            def curator(tracks,prompt,count):
+                self.assertEqual(events,['local']*3+['music']*3)
+                self.assertTrue(all(t.music_features and not t.music_features['verified'] for t in tracks))
+                events.append('select')
+                return tuple(t.id for t in tracks[:count]),'Synthetic'
+            service=prepare(root,ready=False,transport=transport,curator=curator)
+            def analyze(track):
+                dest=root/'artifacts/time-map'/track.id/'track-analysis-v1.json'
+                dest.parent.mkdir(parents=True)
+                dest.write_text(json.dumps({'audio_sha256':track.id,'analysis_cache_key':'synthetic',
+                    'rhythm':{'bpm':128},'bars':[],'structure':{'segments':[]}}))
+                events.append('local')
+            service.analyzer=analyze
+            service.build('two tracks',2);wait(service)
+            self.assertEqual(events,['local']*3+['music']*3+['select'])
+            self.assertEqual(service.snapshot()['status'],'selected')
+            self.assertEqual(service.snapshot()['transitions'],[])
+            self.assertFalse(service.snapshot()['activationReady'])
+
+    def test_build_music_failure_blocks_selection_and_retry_only_fills_failed_song(self):
+        with TemporaryDirectory() as raw:
+            root=Path(raw);curator=Mock(side_effect=lambda tracks,prompt,count:(tuple(t.id for t in tracks[:count]),'Synthetic'))
+            transport=Mock(side_effect=[response(),response('partial','length'),response(),response()])
+            service=prepare(root,transport=transport,curator=curator)
+            service.build('two',2);wait(service)
+            self.assertEqual(service.snapshot()['status'],'error');curator.assert_not_called()
+            self.assertEqual(service.snapshot()['queue'],[])
+            service.build('two',2);wait(service)
+            self.assertEqual(transport.call_count,4);self.assertEqual(curator.call_count,1)
+            self.assertEqual(service.snapshot()['status'],'selected')
+            service.build('two again',2);wait(service)
+            self.assertEqual(transport.call_count,4);self.assertEqual(curator.call_count,2)
+
+    def test_build_local_failure_never_calls_music_or_selection(self):
+        with TemporaryDirectory() as raw:
+            transport=Mock(return_value=response());curator=Mock()
+            service=prepare(Path(raw),ready=False,transport=transport,curator=curator)
+            service.analyzer=Mock(side_effect=RuntimeError('Synthetic local failure'))
+            service.build('two',2);wait(service)
+            transport.assert_not_called();curator.assert_not_called()
+            self.assertEqual(service.snapshot()['status'],'error')
+
+    def test_selection_gate_rejects_missing_music_even_if_called_directly(self):
+        with TemporaryDirectory() as raw:
+            curator=Mock();service=prepare(Path(raw),curator=curator,start_worker=False)
+            service.build('two',2)
+            self.assertEqual(service.snapshot()['buildPhase'],'music_features')
+            service._curate_analyzed_catalog(service.state['buildId'])
+            curator.assert_not_called()
+            self.assertIn('descriptions are incomplete',service.snapshot()['error'])
+
+    def test_build_rejects_unsupported_music_format_before_jobs(self):
+        with TemporaryDirectory() as raw:
+            service=prepare(Path(raw),start_worker=False)
+            track=next(iter(service.catalog.values()))
+            track.path.rename(track.path.with_suffix('.flac'))
+            with self.assertRaisesRegex(ValueError,'MP3/WAV'):
+                service.build('two',2)
+            self.assertEqual(service.queued_jobs,set())

@@ -11,21 +11,36 @@ separately validated local prototype.
 
 ## Current status
 
-On `feat/analyze-library-before-curation`, the current preparation scope ends at
+On `feat/analyze-library-before-curation`, Build ends at
 **analyzed library → Meta song selection and order**. Build first rescans
 `local-assets/samples/` and analyzes every missing library track, including songs
-that will not be selected. Any failed analysis blocks curation. Only after all
-tracks are ready does Meta receive measured BPM, weak section labels, and DSP
-summaries. Cached results are reused. Genre still comes from file tags; normalized
+that will not be selected. Any failed analysis blocks curation. After all local analyses succeed, Build fills missing Muse Spark 1.2 music
+descriptions for the entire library. Only when both stages are ready does Meta
+select songs using measured BPM, weak section labels, DSP summaries and descriptions. Cached results are reused. Genre still comes from file tags; normalized
 energy describes change within each track, not a calibrated cross-song ranking.
-The separate Muse Spark music-features node now adds optional, unverified audio descriptions; see Agent flow below.
+The Muse Spark node can also run independently; its descriptions remain unverified interpretations.
 
 The resulting status is `selected`, with no pair jobs, post-curation transition
 calls, export readiness or automatic playback. Saved selections can be loaded
-without invoking Meta. The existing transition implementation remains below as
-previously built behavior; it is not automatically entered by this branch's Build.
-Its optional `prepare_transitions=True` service path is retained for regression
-coverage and future integration, not enabled by the product bridge.
+without invoking Meta. Continue explicitly with **Prepare transitions → Export Mixxx
+playlist → Start set**. Prepare preserves the selected order, checks pair-cache
+identities, and computes adjacent candidates without another curation call. It
+supports existing clean-break candidates where beat-sync blending is unavailable.
+No candidate or failed pair keeps Export disabled. Retrying preserves successful
+on-disk caches. Preparation survives a bridge restart; a new Build or saved-set
+load returns to selection, requiring preparation again.
+
+Export writes a playlist under `artifacts/live-performance/`. Import/open it in
+Mixxx and select its first song. Start verifies staged song identities, requires
+an initial Meta plan, then starts Deck 1. An unsuccessful initial plan leaves the
+decks stopped. A changed preparation revision invalidates an older export even
+if the song order is unchanged. Auto arm remains a separate explicit control;
+with it off, approve and arm handoffs manually. The previous automatic
+`prepare_transitions=True` service mode remains covered as a legacy internal path.
+The new UI path was checked with a real three-song selected set: both adjacent
+pairs produced 25 clean-break candidates and the playlist exported successfully.
+Both decks remained stopped. Initial-plan gating is tested with synthetic MIDI;
+a new real playback run through this reconnected flow is still pending.
 
 - Implemented here: responsive React/TypeScript control-room UI, typed state
   contract, queue/Deck/plan/event views, deterministic adjacent-pair analysis,
@@ -144,7 +159,7 @@ Validate → Execute → Verify loop, and optional webcam feedback into future
 plans. Select a node to inspect its reported evidence. The request ledger
 shows retained model-call status, latency and token usage where available.
 
-The preparation nodes run **Local library → Analyze library → Muse Spark music features → Select & order**.
+The preparation nodes run **Local library → Analyze library → Muse Spark music features → Select & order → Prepare transitions → Export playlist → Start set**.
 Click **Local library** to open all scanned songs with artist, file-tag genre,
 and duration. Click **Analyze library** to inspect Ready / Not ready / Analyzing /
 Failed counts and individual results. Check individual songs or **Select all songs**,
@@ -153,7 +168,7 @@ disables the button. The analyzer reuses ready results and runs only missing or 
 analyses in the selected subset. This standalone action (`POST /api/set-builder/analyze`
 with an explicit `trackIds` array) stops before Meta selection and preserves
 an existing selected order. **Modal accelerate** is visible but disabled.
-Building a playlist still analyzes any remaining library songs before Meta selection.
+Building a playlist completes local analysis and Muse descriptions for every library song before selection.
 The **Muse Spark music features** node is an explicit action: select MP3/WAV songs
 whose local analysis is ready, then **Call Meta Spark (N)**. It sends the whole
 original audio and the exact music-feature-extractor experiment prompt to
@@ -167,9 +182,12 @@ Results are stored under ignored `artifacts/music-features/<audio-hash>/<prompt-
 each attempt retains its raw response and run metadata. A successful matching
 result is reused across restarts. Empty/truncated responses fail and can be retried;
 interrupted requests do not restart automatically. Opening the node sends no audio.
-Building a playlist does not automatically call the music extractor: available
-descriptions are passed separately as unverified `musicFeatures`, missing ones
-remain unknown, and DSP remains authoritative for measured timing and energy.
+Build automatically fills missing or failed descriptions after every local analysis
+succeeds. Any local or Muse failure blocks selection; another Build reuses successful
+results and retries missing/failed work. Both local and Muse results must be ready
+for every library song. Descriptions are passed separately as unverified
+`musicFeatures`, and DSP remains authoritative for measured timing and energy.
+The current whole-library Build requires MP3/WAV inputs supported by this extractor.
 The existing file-tag genre is retained as its own field. Semantic accuracy has
 not been validated. On 2026-11-02 the user reported successfully running one real
 song through both product nodes (All-In-One + DSP and Muse Spark). This confirms
@@ -182,8 +200,8 @@ shows the submitted request and actual preparation status. Sending invokes the
 same Meta set builder as Control room; opening the dialog makes no model call.
 **Use a saved playlist** lists completed builds from this project's ignored
 `artifacts/live-performance/saved-sets/`. Loading checks local songs and analysis
-identity and reuses analyses. It restores selection only; transition preparation
-is paused in this branch. Original API-call records remain historical.
+identity and reuses analyses. It restores selection; open Prepare transitions to
+continue. Original API-call records remain historical.
 
 Lights reflect reported state: cyan is working, green is complete/available,
 amber is waiting, red is failed/blocked, and gray is idle or unavailable.
@@ -251,8 +269,9 @@ bounded to `local-assets/samples` by default; audio paths and source files are
 never returned to the browser. **Build with Meta** first completes missing
 analyses across the library, then makes a strict curation call for membership and
 order. Progress includes all tracks, not just the selected subset. This branch
-stops with **Playlist selected · transitions paused**. Export and Start stay
-disabled for this selection; the active Mixxx queue is untouched.
+initially stops at **Playlist selected · prepare transitions next**. Prepare
+adjacent candidates, export, then explicitly start. Preparing and exporting leave
+the active Mixxx queue untouched.
 
 Observed Deck state is never overwritten directly. The Arm action never sends
 MIDI directly: it first creates a unique plan instance and delegates identity,

@@ -286,6 +286,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             if (
                 builder.get("status") != "ready"
                 or not builder.get("activationReady")
+                or payload.get("builder_revision") != builder.get("queueRevision")
                 or [str(value) for value in builder.get("orderedTrackIds", [])]
                 != [str(value) for value in queue["ordered_track_ids"]]
             ):
@@ -360,6 +361,17 @@ class LiveStateStore(CrowdAdaptiveMixin):
             return 200, self.set_builder.reorder(ordered)
         except (TypeError, ValueError) as error:
             return 400, {"error": str(error)}
+
+    def request_prepare_transitions(self) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            try:
+                return 202, self.set_builder.prepare_selected_transitions()
+            except ValueError as error:
+                return 409, {"error": str(error)}
+            except Exception as error:
+                return 502, {"error": f"Transition preparation failed ({type(error).__name__})"}
 
     def request_activate_set(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
@@ -527,6 +539,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 if (
                     builder.get("status") != "ready"
                     or not builder.get("activationReady")
+                    or activation.get("builder_revision") != builder.get("queueRevision")
                     or [str(value) for value in builder.get("orderedTrackIds", [])]
                     != [
                         str(value)
@@ -3189,6 +3202,10 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/set-builder/activate":
                 status, response = store.request_activate_set()
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/prepare-transitions":
+                status, response = store.request_prepare_transitions()
                 self._json(status, response)
                 return
             if self.path == "/api/set-builder/start":

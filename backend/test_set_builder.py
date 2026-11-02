@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import time
 import unittest
 
+from music_features import MusicFeatures, CACHE_KEY, MODEL
 from set_builder import SetBuilderService, parse_curator_response, sha256_file
 
 
@@ -16,6 +17,13 @@ def metadata(path: Path) -> dict:
         "genre": "house",
         "durationSeconds": 180.0,
     }
+
+
+def write_music_result(root: Path, track_id: str) -> None:
+    """Preexisting synthetic Muse cache for tests focused on other stages."""
+    MusicFeatures(root, root).save(track_id, {"audioSha256": track_id,
+        "cacheKey": CACHE_KEY, "model": MODEL, "status": "ready", "finishReason": "stop",
+        "content": "Synthetic music description; genre uncertain."})
 
 
 def write_analyzed_library(
@@ -30,6 +38,7 @@ def write_analyzed_library(
         source.write_bytes(f"fixture-{index}".encode())
         track_id = sha256_file(source)
         track_ids.append(track_id)
+        write_music_result(root, track_id)
         output = analysis_root / track_id / "track-analysis-v1.json"
         output.parent.mkdir(parents=True)
         output.write_text(
@@ -195,6 +204,7 @@ class SetBuilderTest(unittest.TestCase):
                 output = root / "artifacts/time-map" / track.id / "track-analysis-v1.json"
                 output.parent.mkdir(parents=True, exist_ok=True)
                 output.write_text(json.dumps(payload), encoding="utf-8")
+                write_music_result(root, track.id)
 
             def original_order(tracks, prompt, count):
                 return tuple(track.id for track in tracks), "mock Meta order"

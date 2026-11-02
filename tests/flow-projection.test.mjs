@@ -15,12 +15,12 @@ function fixture() {
       transitions: [{status:'analyzed', candidateCount:5, reason:null}], curatorCalls: []}};
 }
 const find = (flow, lane, id) => flow[lane].find(n => n.id === id);
-test('library analysis precedes Meta selection and selection-only flow ends there', () => {
+test('library analysis precedes selection with explicit preparation and start nodes', () => {
   const s=fixture();s.setBuilder.selectionOnly=true;s.setBuilder.buildPhase='library_analysis';
   s.setBuilder.library=s.setBuilder.queue;s.setBuilder.queue=[];
   s.setBuilder.library[1].analysisStatus='analyzing';
   const flow=deriveAgentFlow(s,null,false,now);
-  assert.deepEqual(flow.preparation.map(n=>n.id),['library','analysis','music','curation']);
+  assert.deepEqual(flow.preparation.map(n=>n.id),['library','analysis','music','curation','pairs','export','start']);
   assert.equal(find(flow,'preparation','analysis').status,'running');
   assert.equal(find(flow,'preparation','curation').status,'waiting');
   assert.match(find(flow,'preparation','analysis').label,/1\/2 ready/);
@@ -118,4 +118,29 @@ test('music feature node tracks actual requests separately from queued songs and
   assert.equal(flow.inFlight,0);
   assert.match(flow.records[0].detail,/cached/);
   assert.equal(find(deriveAgentFlow(s,null,true,now),'preparation','music').status,'stale');
+});
+
+test('selection waits during automatic Muse description stage', () => {
+  const s=fixture();s.setBuilder.selectionOnly=true;s.setBuilder.status='analyzing';
+  s.setBuilder.buildPhase='music_features';s.setBuilder.library=s.setBuilder.queue;s.setBuilder.queue=[];
+  s.setBuilder.library[0].musicFeatures={status:'running',requestStartedAt:new Date(now-1000).toISOString()};
+  s.setBuilder.library[1].musicFeatures={status:'ready',content:'Synthetic'};
+  const flow=deriveAgentFlow(s,null,false,now);
+  assert.equal(find(flow,'preparation','curation').status,'waiting');
+  assert.equal(find(flow,'preparation','curation').label,'Waiting for Muse descriptions');
+  assert.equal(find(flow,'preparation','music').status,'running');
+  assert.equal(find(flow,'preparation','analysis').status,'done');
+});
+
+
+test('prepared candidates and export do not imply the selected set is playing', () => {
+  const s=fixture();s.setBuilder.preserveSelectedOrder=true;s.setBuilder.activation={status:'playlist_ready'};
+  let flow=deriveAgentFlow(s,null,false,now);
+  assert.equal(find(flow,'preparation','start').status,'waiting');
+  assert.equal(flow.preparation.some(n=>n.id==='refine'),false);
+  s.flowTelemetry.continuousSetActive=true;s.queue=[{id:'a'},{id:'b'}];
+  flow=deriveAgentFlow(s,null,false,now);
+  assert.equal(find(flow,'preparation','start').status,'done');
+  s.queue=[{id:'other'}];
+  assert.equal(find(deriveAgentFlow(s,null,false,now),'preparation','start').status,'waiting');
 });

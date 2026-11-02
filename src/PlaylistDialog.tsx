@@ -68,7 +68,7 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Could not load playlist");
       setSent(null);
-      setNotice(`Loaded ${selected.trackCount} tracks and their saved order. This stage stops at selection; no transition or playback was started.`);
+      setNotice(`Loaded ${selected.trackCount} tracks and their saved order. Open Prepare transitions to continue to Mixxx playback.`);
     } catch (error) {setError(error instanceof Error ? error.message : String(error));}
     finally {setBusy(false);}
   };
@@ -83,13 +83,14 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
     </div>
     {mode === "new" ? <>
       <div className="playlist-chat" role="log" aria-label="Playlist conversation" aria-live="polite">
-        <div className="playlist-message"><strong>Playlist assistant</strong><p>Tell me the playlist you want. I’ll first analyze every song in your local library, reusing existing results. Once all analyses succeed, Meta will select and order your tracks. This stage stops at the playlist.</p></div>
+        <div className="playlist-message"><strong>Playlist assistant</strong><p>Tell me the playlist you want. I’ll complete All-In-One + DSP and Muse Spark music descriptions for every song in your library, reusing existing results. Once both stages succeed, Meta will select and order your tracks. Then prepare transitions and export your playlist before starting the set.</p></div>
         {sent && <div className="playlist-message playlist-message--user"><strong>You · {sent.count} tracks</strong><p>{sent.prompt}</p></div>}
         {sent && <div className="playlist-message"><strong>{match && b?.model ? b.model : "Preparation status"}</strong>
           <p>{error ? error : !match ? "Submitting your build request…"
             : b?.error ? b.error : b?.buildPhase === "library_analysis" ? `Analyzing the library: ${b.library?.filter(t => t.analysisStatus === "ready").length ?? 0}/${b.catalogCount} ready. Meta has not selected songs yet.`
+            : b?.buildPhase === "music_features" ? `Muse Spark music descriptions: ${b.library?.filter(t => t.musicFeatures?.status === "ready").length ?? 0}/${b.catalogCount} ready. Song selection waits for every description.`
             : b?.status === "curating" ? "Library analyzed. Meta is selecting and ordering songs…"
-            : b?.status === "selected" ? `Your ${b.queue.length}-track playlist is selected and ordered. Transition preparation is paused.`
+            : b?.status === "selected" ? `Your ${b.queue.length}-track playlist is selected and ordered. Next, open Prepare transitions.`
             : b?.status === "ready" ? `Your ${b.queue.length}-track playlist is prepared.`
             : b?.status === "planning" ? "Refining the order using measured audio features…"
             : `${b?.queue.length ?? 0} tracks selected. ${b?.queue.filter(t => t.analysisStatus === "ready").length ?? 0} analyses ready; preparing adjacent transitions.`}</p>
@@ -104,7 +105,7 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
           onChange={event => {setPrompt(event.target.value); const parsed = requestedTrackCount(event.target.value); if (parsed != null) setCount(parsed);}} />
         <div className="playlist-composer__actions"><label>Tracks<input type="number" min={2} max={Math.max(2, max)} value={count} disabled={locked} onChange={event => setCount(Number(event.target.value))} /></label>
           <button type="submit" className="button button--primary" disabled={locked || !validCount || !prompt.trim()}>{busy || preparing ? "Preparing…" : `Send · build ${count} tracks`}</button></div>
-        <small>{max < 2 ? "Add at least two songs to local-assets/samples/ and restart the bridge." : !validCount ? `Choose 2–${max} tracks.` : `Sending analyzes all ${b?.catalogCount ?? 0} library tracks before asking Meta to choose ${count}. Model calls use API credits.`}</small>
+        <small>{max < 2 ? "Add at least two songs to local-assets/samples/ and restart the bridge." : !validCount ? `Choose 2–${max} tracks.` : `Sending completes local analysis and Muse Spark descriptions for all ${b?.catalogCount ?? 0} library tracks before selecting ${count}. Model calls use API credits.`}</small>
       </form>
     </> : <div className="playlist-saved">
       <div className="playlist-saved__heading"><p>Completed playlists saved in this project.</p><button type="button" className="button button--ghost" disabled={loading} onClick={() => setReload(v => v + 1)}>Refresh</button></div>

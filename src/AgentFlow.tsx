@@ -4,6 +4,7 @@ import type {FlowNode} from "./flowProjection";
 import type {CopilotState, WebcamFlowState} from "./types";
 import "./agent-flow.css";
 import {PlaylistDialog} from "./PlaylistDialog";
+import {TransitionSetupDialog} from "./TransitionSetupDialog";
 import {MusicFeaturesDialog} from "./MusicFeaturesDialog";
 import {LibraryDialog} from "./LibraryDialog";
 import type {BuildResult} from "./playlistRequest";
@@ -17,6 +18,7 @@ function FlowStep({item, number, selected, onSelect}: {item: FlowNode; number: n
     {item.id === "library" && <span className="flow-node__action">View all songs ↗</span>}
     {item.id === "analysis" && <span className="flow-node__action">Review / analyze songs ↗</span>}
     {item.id === "music" && <span className="flow-node__action">Call Spark / inspect results ↗</span>}
+    {["pairs", "export", "start"].includes(item.id) && <span className="flow-node__action">Prepare / export / start ↗</span>}
     {item.id === "curation" && <span className="flow-node__action">Build / choose playlist ↗</span>}
     <span className="flow-node__status">{item.label}</span>
   </button>;
@@ -28,13 +30,15 @@ function Lane({nodes, selected, setSelected, name}: {nodes: FlowNode[]; selected
 }
 const time = (at: number) => Number.isFinite(at) ? new Date(at).toLocaleTimeString([], {hour12: false}) : "—";
 
-export function AgentFlow({state, webcam, disconnected, active, disabled, onBuild, onAnalyze, onDescribeMusic}: {state: CopilotState; webcam: WebcamFlowState | null; disconnected: boolean; active: boolean; disabled: boolean; onBuild: (prompt: string, count: number) => Promise<BuildResult>; onAnalyze: (trackIds: string[]) => Promise<BuildResult>; onDescribeMusic: (trackIds: string[]) => Promise<BuildResult>}) {
+export function AgentFlow({state, webcam, disconnected, active, disabled, onBuild, onAnalyze, onDescribeMusic, onSetAction}: {state: CopilotState; webcam: WebcamFlowState | null; disconnected: boolean; active: boolean; disabled: boolean; onBuild: (prompt: string, count: number) => Promise<BuildResult>; onAnalyze: (trackIds: string[]) => Promise<BuildResult>; onDescribeMusic: (trackIds: string[]) => Promise<BuildResult>; onSetAction: (action: "prepare-transitions" | "activate" | "start") => Promise<BuildResult>}) {
   const [selected, setSelected] = useState("analysis");
+  const [setupOpen, setSetupOpen] = useState(false);
   const [musicOpen, setMusicOpen] = useState(false);
   const [playlistOpen, setPlaylistOpen] = useState(false);
   const [libraryPanel, setLibraryPanel] = useState<"library" | "analysis" | null>(null);
   const selectNode = (id: string) => {
     setSelected(id);
+    if (["pairs", "export", "start"].includes(id)) setSetupOpen(true);
     if (id === "music") setMusicOpen(true);
     if (id === "curation") setPlaylistOpen(true);
     if (id === "library" || id === "analysis") setLibraryPanel(id);
@@ -70,7 +74,7 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
     <section className="flow-section" aria-labelledby="preparation-flow-title">
       <div className="flow-section__heading"><div><span className="flow-section__index">01</span><h2 id="preparation-flow-title">Analyze first, then select</h2></div><span>Library → All-In-One + DSP → Muse Spark → Select & order</span></div>
       <Lane nodes={flow.preparation} selected={selected} setSelected={selectNode} name="prepare" />
-      <p className="flow-section__note">All library tracks must finish local analysis before playlist selection. Call Muse Spark separately to add music descriptions; existing results can be reused. This stage ends at song selection and order; transition preparation is paused.</p>
+      <p className="flow-section__note">Build completes local analysis, then Muse Spark music descriptions for the entire library before selecting songs. Existing results are reused; either stage can also run separately. After selection, prepare adjacent transition candidates, export the playlist, then start the set explicitly.</p>
 
     </section>
     <section className="flow-section flow-section--loop" aria-labelledby="live-flow-title">
@@ -104,6 +108,7 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
     </div>
     <LibraryDialog open={libraryPanel !== null && active} mode={libraryPanel ?? "library"} onClose={() => setLibraryPanel(null)} state={state} disabled={disabled || disconnected} disconnected={disconnected} now={now} onAnalyze={onAnalyze} />
     <MusicFeaturesDialog open={musicOpen && active} onClose={() => setMusicOpen(false)} state={state} disabled={disabled || disconnected} onAnalyze={onDescribeMusic} />
+    <TransitionSetupDialog open={setupOpen && active} onClose={() => setSetupOpen(false)} state={state} disabled={disabled || disconnected} onAction={onSetAction} />
     <PlaylistDialog open={playlistOpen && active} onClose={() => setPlaylistOpen(false)} state={state} disabled={disabled || disconnected} onBuild={onBuild} />
   </div>;
 }

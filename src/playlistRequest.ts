@@ -1,4 +1,4 @@
-export type BuildResult = {ok: boolean; error?: string; buildId?: string};
+export type BuildResult = {ok: boolean; error?: string; buildId?: string; message?: string};
 
 // Only explicit song counts affect the numeric control; BPM and durations do not.
 export function requestedTrackCount(prompt: string): number | null {
