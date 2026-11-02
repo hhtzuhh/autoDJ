@@ -35,7 +35,7 @@ separately validated local prototype.
   selector and native-tempo executor compile them into a target-start →
   fader-cut → source-stop handoff; they never enter the beat-sync crossfade
   compiler.
-- Safe set activation is split into two explicit stages. **Prepare Mixxx set**
+- Safe set activation is split into two explicit stages. **Export Mixxx playlist**
   writes a hash-verified playlist without mutating the active queue. After the
   operator opens it and selects its first row, **Start set** requires both
   Decks stopped, verifies the first two full audio identities, obtains the
@@ -86,6 +86,11 @@ separately validated local prototype.
   redistributable audio fixtures.
 - The UI labels simulation data explicitly. It does not present fixture events
   as live model or audio-engine behavior.
+- Crowd observation: a separate manual-upload panel sends a silent clip to
+  Muse Spark 1.3 and shows regional movement, timestamp evidence and visibility
+  limits. It is observation-only: no queue, planner or Mixxx control connection.
+  Uploaded footage is not labeled as a live camera feed. See
+  [setup, limitations and verification](docs/CROWD_OBSERVATION.md).
 
 ## Run the frontend
 
@@ -98,27 +103,95 @@ npm run dev
 
 Open the Vite URL, normally `http://127.0.0.1:5173`.
 
+For optional Crowd observation, install ffmpeg/ffprobe and use Node >=22.9.
+Set `MODEL_API_KEY` in your environment or repository `.env`, then run
+`npm run crowd` in a second terminal. The dashboard proxies `/api/crowd` to
+the loopback-only service on port 8767. The panel works alongside either DJ
+simulation or the live bridge. Uploaded Analyze calls and active webcam cycles
+make real Meta requests. **Start webcam observation** captures six silent seconds
+per cycle; **Enable adaptive DJ** additionally requires `?source=live`, an active
+continuous set and Auto arm. It stages bounded future reorders/transition choices
+for the next completed handoff. Human takeover stays authoritative.
+
+Computer webcam → Muse observation was verified once. The full adaptive audio
+loop is implemented and covered by synthetic tests, but a real dance/Mixxx
+rehearsal remains pending. See [behavior, gestures and limits](docs/CROWD_OBSERVATION.md).
+The vision service does not require the private experiment workspace or SAM.
+Actual DJ execution still uses the development bridge described below.
+
+### Agent flow view
+
+Select **Agent flow** beside **Control room**, or open
+`http://127.0.0.1:5173/?source=live&view=flow` with the live bridge running.
+The view follows three paths: set preparation, the live Observe → Plan →
+Validate → Execute → Verify loop, and optional webcam feedback into future
+plans. Select a node to inspect its reported evidence. The request ledger
+shows retained model-call status, latency and token usage where available.
+
+Click the **Select & order** node to open the playlist dialog. **Build a new
+playlist** accepts a natural-language request; explicit song counts populate
+the visible Tracks field, which is authoritative when sent. The conversation
+shows the submitted request and actual preparation status. Sending invokes the
+same Meta set builder as Control room; opening the dialog makes no model call.
+**Use a saved playlist** lists completed builds from this project's ignored
+`artifacts/live-performance/saved-sets/`. Loading checks local songs and analysis
+identity, reuses analyses, and checks adjacent pairs. It changes preparation only;
+Export and Start are separate actions. Original API-call records remain historical.
+
+Lights reflect reported state: cyan is working, green is complete/available,
+amber is waiting, red is failed/blocked, and gray is idle or unavailable.
+Cached audio analysis is distinguished from computation in the recorded build;
+older results without provenance are labeled accordingly. Live execution
+requires fresh bridge telemetry and an owned, running executor. The handoff
+counter resets on bridge restart and excludes restored plans. Disconnection
+removes live execution claims; simulation is explicitly labeled.
+
+Select **Analyze audio** to see every selected track, its analysis source,
+status, and recorded job ID/runner/duration. Complete metadata reuse, reuse of
+All-In-One's internal neural-output cache with DSP recomputation, and fresh
+neural inference are separate cases. A custom/injected analyzer is not labeled
+as a neural run without evidence. Old results retain unknown execution history.
+Analysis jobs currently run serially on the local CPU; Modal fan-out is not
+implemented. The per-track records make that future execution path inspectable.
+
+Viewing this page does not make model calls or advance playback. The agent
+observes continuously and requests bounded Meta decisions when needed; it
+does not call the model on every UI update. Both in-app views stay mounted,
+so switching between them does not stop webcam capture. Hiding the browser
+tab still stops capture. Human controls remain available in either view.
+
+Verified with the live idle bridge, node inspection and automated state
+projection/telemetry tests. A full playing-set and audience-feedback rehearsal
+of the new display is still pending. Run `npm run test:flow` with Node >=22.18
+(native TypeScript stripping), plus the backend suite below.
+
 ### Development live bridge
 
-First resolve the private development library into tonight's exact set list.
-The generated manifest and playlist remain outside the public repository:
+From the `submission/` directory, put your private songs in
+`local-assets/samples/` **before starting the bridge**. This folder and
+`artifacts/` are inside the product checkout, but Git ignores their contents
+except the folder README files. Existing outer-workspace analyses and playlists
+are not imported. The bridge can start with no analysis, queue or plan.
 
 ```bash
-python3 submission/backend/setlist_service.py \
-  --analysis-root artifacts/time-map \
-  --queue-state artifacts/live-performance/queue-state-v1.json \
-  --library-root local-assets/samples \
-  --playlist artifacts/live-performance/tonight-set-list.m3u8 \
-  --manifest artifacts/live-performance/tonight-set-list-v1.json
+npm run data:init
+npm run bridge
+# In a second terminal:
+npm run dev
 ```
 
-Open the generated playlist in Mixxx and leave its selection on the row that
-the current queue loader expects. Then, with the Mixxx MIDI mapping installed:
+Open Mixxx with the installed MIDI mapping to supply observed state. The bridge
+still uses the sibling workspace's Python environments and observer/executor
+implementation; this change relocates product data, not those dependencies.
+`--workspace-root` identifies that toolchain; `--data-root` overrides the product
+data location and defaults to this repository regardless of the working directory.
 
-```bash
-experiments/mixxx-control/.venv/bin/python \
-  submission/backend/live_bridge.py
-```
+For a repeatable empty-output run, stop bridge and crowd services, then run
+`npm run data:fresh`. Previous outputs (including saved playlists) move to
+`.local/archives/` inside this checkout; songs remain. Restart the bridge after
+changing songs. The analyzer's intermediate WAV, neural output and DSP data all
+use this run's `artifacts/time-map/`; it does not reuse the outer neural cache.
+The observer refreshes its catalog as new analyses complete.
 
 Then open:
 
@@ -130,8 +203,8 @@ The Queue panel now also exposes the development set builder. Its catalog is
 bounded to `local-assets/samples` by default; audio paths and source files are
 never returned to the browser. **Build with Meta** makes one strict curation
 call for membership and order, then reports track and edge analysis status as
-the local worker progresses. Once every edge is ready, select **Prepare Mixxx
-set**, open the generated playlist, and select its first row. **Start set**
+the local worker progresses. Once every edge is ready, select **Export Mixxx
+playlist**, open the generated playlist, and select its first row. **Start set**
 verifies the first two rows before changing the active queue or playing Deck
 1. It plans but does not arm the first transition.
 
@@ -174,6 +247,24 @@ the documented [Meta Chat Completions reasoning API](https://dev.meta.ai/docs/re
 Truncated responses are rejected before compilation. Request metrics never
 include credentials or internal reasoning text. The timeout remains 30 seconds;
 short refill windows still show a risk instead of claiming a guaranteed buffer.
+
+Set building uses a separate preparation budget: `META_CURATOR_MAX_TOKENS=4096`
+and `META_CURATOR_TIMEOUT_SECONDS=60`. Only a response explicitly truncated by
+the output limit gets one larger-budget retry (double, capped at 8192). Partial
+output is always rejected; timeout, HTTP and schema errors are not retried.
+This applies to initial curation and post-analysis reordering, not live transition
+planning. Safe attempt/usage metrics are retained in private set-builder state.
+If the post-analysis pass still fails, **Retry planning only** reuses completed
+track/pair analysis instead of rebuilding the set. A failed plan cannot display
+Ready to activate. The Build button shows the numeric track count actually sent;
+that field takes precedence over a count embedded in the description.
+
+On 2026-11-01, a real failed ten-track post-analysis pass was resumed without
+re-running analysis or starting Mixxx playback. It completed on the first
+4096-token attempt in 7.97 seconds, using 2079 completion tokens (1555 reasoning
+and 524 visible). The prepared set returned to ready; the active queue revision
+and stopped Decks were unchanged. Retry bounding, rejection of truncated output,
+analysis reuse and readiness/stale-result guards are covered by offline tests.
 
 The planner sends at most ten locally feasible candidates in exactly one Meta
 Model API call. The response may select a candidate and request the supported

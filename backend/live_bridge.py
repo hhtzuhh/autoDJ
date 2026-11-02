@@ -46,6 +46,8 @@ from meta_planner import (  # noqa: E402
     select_with_meta,
 )
 from set_builder import SetBuilderService  # noqa: E402
+from crowd_adaptive import CrowdAdaptiveMixin  # noqa: E402
+from flow_telemetry import LiveFlowTelemetry  # noqa: E402
 from clean_break import compile_clean_break_plan, select_clean_break_with_meta  # noqa: E402
 from set_activation import (  # noqa: E402
     load_prepared_activation,
@@ -55,6 +57,7 @@ from set_activation import (  # noqa: E402
 
 
 DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8765
 ACCENTS = ("cyan", "violet", "amber")
 
@@ -86,9 +89,12 @@ def find_track_deck(performance: Any, track_id: str) -> tuple[int, Any] | None:
     )
 
 
-class LiveStateStore:
-    def __init__(self, workspace: Path) -> None:
+class LiveStateStore(CrowdAdaptiveMixin):
+    def __init__(self, workspace: Path, *, data_root: Path | None = None) -> None:
         self.workspace = workspace
+        self._data_root = (data_root or workspace).resolve()
+        (self.data_root / "artifacts/live-performance").mkdir(parents=True, exist_ok=True)
+        self.flow_telemetry = LiveFlowTelemetry()
         self.lock = threading.Lock()
         self.state: dict[str, Any] | None = None
         self.error: str | None = None
@@ -117,14 +123,16 @@ class LiveStateStore:
         self.continuity_guard_tracks: set[str] = set()
         self.continuity_guard_last: dict[str, float] = {}
         self.activation_in_progress = False
-        self.queue = load_json(
-            workspace / "artifacts/live-performance/queue-state-v1.json"
-        )
+        queue_path = self.data_root / "artifacts/live-performance/queue-state-v1.json"
+        self.queue = load_json(queue_path) if queue_path.exists() else {
+            "schema_version": 1, "revision": 0, "ordered_track_ids": [],
+            "updated_at": datetime.now().astimezone().isoformat(),
+        }
         self.set_list_manifest_path = (
-            workspace / "artifacts/live-performance/tonight-set-list-v1.json"
+            self.data_root / "artifacts/live-performance/tonight-set-list-v1.json"
         )
         self.analysis_catalog = AnalysisCatalog.from_root(
-            workspace / "artifacts/time-map"
+            self.data_root / "artifacts/time-map"
         )
         queue_snapshot = QueueSnapshot(
             revision=int(self.queue["revision"]),
@@ -134,7 +142,7 @@ class LiveStateStore:
         self.transition_pipeline = TransitionPipeline(
             VersionedQueue(self.analysis_catalog, queue_snapshot),
             PairAnalysisCache(
-                workspace / "artifacts/live-performance/dashboard-pairs",
+                self.data_root / "artifacts/live-performance/dashboard-pairs",
                 self.analysis_catalog,
             ),
         )
@@ -153,8 +161,12 @@ class LiveStateStore:
             self._restore_following_override()
             self._restore_transition_buffer_overrides()
         self.catalog = self._load_catalog()
-        self.set_builder = SetBuilderService(workspace)
+        self.set_builder = SetBuilderService(workspace, data_root=self.data_root)
         self.sampler_slots = self._restore_sampler_slot_registry()
+
+    @property
+    def data_root(self) -> Path:
+        return getattr(self, "_data_root", self.workspace)
 
     def _invalidate_restored_envelope(self) -> None:
         # A disk artifact cannot establish ownership of a running executor.
@@ -173,20 +185,20 @@ class LiveStateStore:
 
     def _load_selection(self) -> dict[str, Any]:
         candidates = (
-            self.workspace
+            self.data_root
             / "artifacts/live-performance/dashboard-meta-selection-v1.json",
-            self.workspace
+            self.data_root
             / "artifacts/live-performance/live-replan-selection-v1.json",
-            self.workspace
+            self.data_root
             / "artifacts/live-performance/rolling-selection-v1.json",
         )
         for path in candidates:
             if path.exists():
                 return load_json(path)
-        raise FileNotFoundError("no live or rolling selection artifact is available")
+        return {}
 
     def _load_envelope(self) -> dict[str, Any] | None:
-        runtime = self.workspace / "artifacts/live-performance"
+        runtime = self.data_root / "artifacts/live-performance"
         for path in (
             runtime / "dashboard-active-envelope-v1.json",
             runtime / "live-replan-envelope-v1.json",
@@ -196,7 +208,7 @@ class LiveStateStore:
         return None
 
     def _load_catalog(self) -> dict[str, dict[str, Any]]:
-        root = self.workspace / "artifacts/time-map"
+        root = self.data_root / "artifacts/time-map"
         catalog: dict[str, dict[str, Any]] = {}
         for path in sorted(root.glob("*/track-analysis-v1.json")):
             payload = load_json(path)
@@ -257,10 +269,14 @@ class LiveStateStore:
             state["plan"].update(self._planning_activity())
             state["setBuilder"] = self.set_builder.snapshot()
             state["setBuilder"]["activation"] = self._activation_snapshot()
+            if hasattr(self, "flow_telemetry"):
+                state["flowTelemetry"] = self.flow_telemetry.snapshot(self.supervisor,
+                    continuous=self.continuous_set_active, activating=self.activation_in_progress,
+                    rotating=self.auto_chain_thread is not None and self.auto_chain_thread.is_alive())
         return state, error
 
     def _activation_snapshot(self) -> dict[str, Any] | None:
-        path = self.workspace / "artifacts/live-performance/prepared-activation-v1.json"
+        path = self.data_root / "artifacts/live-performance/prepared-activation-v1.json"
         if not path.exists():
             return None
         try:
@@ -295,6 +311,21 @@ class LiveStateStore:
         except Exception as error:
             return 502, {"error": str(error)}
 
+    def request_set_retry(self) -> tuple[int, dict[str, Any]]:
+        try:
+            return 202, self.set_builder.retry_post_plan()
+        except ValueError as error:
+            return 409, {"error": str(error)}
+
+    def request_load_saved_set(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            try:
+                return 200, self.set_builder.load_saved_set(str(payload.get("id", "")))
+            except (ValueError, KeyError, OSError) as error:
+                return 409, {"error": str(error)}
+
     def request_queue_reorder(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         if self._executor_running():
             return 409, {"error": "queue is locked while a transition executes"}
@@ -316,7 +347,7 @@ class LiveStateStore:
                 return 409, {"error": "stop both Decks before preparing a new live set"}
             try:
                 prepared = prepare_activation(
-                    self.workspace,
+                    self.data_root,
                     self.set_builder.snapshot(),
                     active_queue_revision=int(self.queue["revision"]),
                 )
@@ -390,7 +421,7 @@ class LiveStateStore:
     def _restore_sampler_slot_registry(self) -> dict[str, int]:
         """Recover the exact staged queue mapping after a bridge restart."""
         activation_path = (
-            self.workspace
+            self.data_root
             / "artifacts/live-performance/prepared-activation-v1.json"
         )
         if not activation_path.exists() or not self.set_list_manifest_path.exists():
@@ -420,10 +451,10 @@ class LiveStateStore:
     def _install_active_queue(self, queue: dict[str, Any]) -> None:
         self.queue = queue
         self.set_list_manifest_path = (
-            self.workspace / "artifacts/live-performance/tonight-set-list-v1.json"
+            self.data_root / "artifacts/live-performance/tonight-set-list-v1.json"
         )
         self.analysis_catalog = AnalysisCatalog.from_root(
-            self.workspace / "artifacts/time-map"
+            self.data_root / "artifacts/time-map"
         )
         snapshot = QueueSnapshot(
             revision=int(queue["revision"]),
@@ -433,7 +464,7 @@ class LiveStateStore:
         self.transition_pipeline = TransitionPipeline(
             VersionedQueue(self.analysis_catalog, snapshot),
             PairAnalysisCache(
-                self.workspace / "artifacts/live-performance/dashboard-pairs",
+                self.data_root / "artifacts/live-performance/dashboard-pairs",
                 self.analysis_catalog,
             ),
         )
@@ -462,7 +493,7 @@ class LiveStateStore:
             if any(deck.play is True for deck in self.raw_performance.decks.values()):
                 return 409, {"error": "stop both Decks before starting a prepared set"}
             activation_path = (
-                self.workspace / "artifacts/live-performance/prepared-activation-v1.json"
+                self.data_root / "artifacts/live-performance/prepared-activation-v1.json"
             )
             if not activation_path.exists():
                 return 409, {"error": "prepare the Mixxx set before starting it"}
@@ -589,7 +620,7 @@ class LiveStateStore:
                                 "both Decks remain stopped."
                             ),
                         }
-                    queue = promote_prepared_activation(self.workspace, activation)
+                    queue = promote_prepared_activation(self.data_root, activation)
                 except Exception:
                     self._install_active_queue(previous_queue)
                     self.current_track_id = previous_current_id
@@ -671,7 +702,7 @@ class LiveStateStore:
             from plan_lifecycle import PerformanceSnapshot
             from queue_service import QueueStore
 
-            runtime = self.workspace / "artifacts/live-performance"
+            runtime = self.data_root / "artifacts/live-performance"
             supervisor = LifecycleSupervisor(
                 selection=live_selection,
                 queue_store=QueueStore(runtime / "queue-state-v1.json"),
@@ -706,6 +737,8 @@ class LiveStateStore:
                 return 409, {"error": "recover_from_live_position_required",
                              "message": "Recover from the current deck first, then enable Auto arm."}
             self.auto_arm_enabled = enabled
+            if not enabled:
+                self._crowd_stop("Auto arm disabled by operator.")
             self._append_system_event(
                 "Auto arm enabled" if enabled else "Auto arm disabled",
                 (
@@ -1030,7 +1063,7 @@ class LiveStateStore:
                 compiled["based_on_planning_epoch"] = planning_epoch
                 self._stamp_meta_origin(compiled, meta_call)
                 output = (
-                    self.workspace
+                    self.data_root
                     / "artifacts/live-performance/dashboard-future-meta-selection-v1.json"
                 )
                 temporary = output.with_suffix(".json.tmp")
@@ -1384,7 +1417,7 @@ class LiveStateStore:
 
     def _constrained_window_candidates(
         self, pairings: tuple[dict[str, Any], ...], minimum_exit: int,
-        source_index: int, queue_ids: list[str],
+        source_index: int, queue_ids: list[str], intent: str = "maintain_energy",
     ) -> list[dict[str, Any]]:
         # The local search remains bounded (16 options per edge, at most 4096
         # combinations). Apply live constraints BEFORE the ten-candidate API cap.
@@ -1392,7 +1425,7 @@ class LiveStateStore:
         load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
         feasible = []
         shifted_feasibility: dict[tuple[int, int], bool] = {}
-        for candidate in build_transition_window_candidates(pairings, limit=None):
+        for candidate in build_transition_window_candidates(pairings, intent=intent, limit=None):
             first = candidate["transitions"][0]
             if int(first["source_exit_beat_index"]) < minimum_exit:
                 continue
@@ -1532,7 +1565,7 @@ class LiveStateStore:
             source_deck=source_deck,
             target_deck=target_deck,
             plan_suffix=suffix,
-            use_bass_swap=False,
+            use_bass_swap=bool(edge.get("use_bass_swap", False)),
         )
 
     @staticmethod
@@ -1660,6 +1693,7 @@ class LiveStateStore:
                 **edge,
                 "source_track_id": track_ids[index],
                 "target_track_id": track_ids[index + 1],
+                "use_bass_swap": bool(selection.decision.use_bass_swap) if index == 0 and edge["mode"] != "clean_break" else False,
             }
             for index, edge in enumerate(selection.candidate["transitions"])
         ]
@@ -2092,7 +2126,7 @@ class LiveStateStore:
 
     def _write_dashboard_selection(self, selection: dict[str, Any]) -> None:
         output = (
-            self.workspace
+            self.data_root
             / "artifacts/live-performance/dashboard-meta-selection-v1.json"
         )
         temporary = output.with_suffix(".json.tmp")
@@ -2300,6 +2334,7 @@ class LiveStateStore:
                 raise RuntimeError("automatic_rotation_preconditions_failed")
             if self.auto_chain_cancel.is_set():
                 return
+            target_id = self._crowd_commit(source_id, target_id, recycled_deck)
             self._verify_set_list_edge(source_id, target_id)
 
             self._append_system_event(
@@ -2316,9 +2351,12 @@ class LiveStateStore:
             if sampler_slot is None:
                 raise RuntimeError(f"exact_sampler_slot_missing:{target_id[:8]}")
             with mido.open_output(port_name()) as output:
-                with self.lock:
-                    previous_revision = int(self.raw_performance.revision)
-                send_load_sampler_value(output, recycled_deck, sampler_slot)
+                with self.action_lock:
+                    if self.auto_chain_cancel.is_set():
+                        return
+                    with self.lock:
+                        previous_revision = int(self.raw_performance.revision)
+                    send_load_sampler_value(output, recycled_deck, sampler_slot)
             if not self._wait_for_loaded_track_after_revision(
                 recycled_deck, target_id, previous_revision
             ):
@@ -2341,12 +2379,14 @@ class LiveStateStore:
                 )
             if self.auto_chain_cancel.is_set():
                 return
+            self._crowd_execution_status("promoted", str(self.selection["next_executable_plan"]["plan_id"]))
             if self.auto_arm_enabled:
                 status, payload = self._arm_ready_plan_with_retry()
                 if status != 202:
                     raise RuntimeError(
                         f"following_plan_arm_failed:{payload.get('error')}"
                     )
+                self._crowd_execution_status("armed", str(payload.get("plan_id", "")))
                 self._append_system_event(
                     "Following transition auto-armed",
                     "The ready B→C plan is now controlled by the local lifecycle supervisor.",
@@ -2357,6 +2397,7 @@ class LiveStateStore:
                     "The B→C plan is buffered and waiting for human Approve & arm.",
                 )
         except Exception as error:
+            self._crowd_execution_status("rotation_failed")
             self._append_system_event(
                 "Automatic deck rotation stopped",
                 f"{type(error).__name__}: {error}. Current playback was preserved.",
@@ -2513,6 +2554,7 @@ class LiveStateStore:
     def request_takeover(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
             self.auto_arm_enabled = False
+            self._crowd_stop("Human takeover.")
             self.auto_chain_cancel.set()
             if (
                 self.auto_chain_thread is not None
@@ -2547,6 +2589,7 @@ class LiveStateStore:
         envelope = self.envelope
         if not isinstance(envelope, dict) or envelope.get("status") != "invalidated":
             return
+        self._crowd_stop("Human control invalidated the plan.")
         reason = str(envelope.get("invalidation_reason") or "")
         plan_id = str(envelope.get("plan_id") or "")
         if not reason.startswith("human_") or not plan_id:
@@ -2719,6 +2762,31 @@ class LiveStateStore:
         planning_pending = not isinstance(
             self.selection.get("next_executable_plan"), dict
         )
+        if not queue_ids:
+            # Empty preparation is a real live state, not a fixture or a
+            # fabricated plan. No old workspace artifacts are consulted.
+            plan = {
+                "id": "", "status": "draft", "sourceTrackId": "", "targetTrackId": "",
+                "sourceCueBeat": 0, "sourceExitBeat": 0, "sourceCuePosition": 0,
+                "sourceMixStartPosition": 0, "sourceMixEndPosition": 0,
+                "targetEntryBeat": 0, "targetEntryPosition": 0, "bars": 0,
+                "intent": "Prepare a set", "confidence": 0,
+                "reason": "Build a set, export its playlist, then Start set. No active queue or transition plan yet.",
+                "selectedBy": None, "model": None, "queueRevision": int(self.queue["revision"]),
+                "performanceRevision": int(performance.revision), "invalidationReason": None,
+                "planningWindowTrackIds": [], "activeTransitionLocked": False,
+                **self._planning_activity(),
+            }
+            with self.lock:
+                self.raw_performance = performance
+                self.state = {"dataSource": "live", "connected": True,
+                              "autoArmEnabled": False, "queueRevision": int(self.queue["revision"]),
+                              "performanceRevision": int(performance.revision),
+                              "crossfader": float(performance.crossfader or 0), "decks": decks,
+                              "queue": [], "transitions": [], "plan": plan, "events": list(self.events)}
+                self.error = None
+            self.flow_telemetry.observe(None)
+            return
         if planning_pending:
             source_id = current_id or queue_ids[0]
             source_index = queue_ids.index(source_id)
@@ -2946,9 +3014,14 @@ class LiveStateStore:
         supervisor = self.supervisor
         if supervisor is not None:
             supervisor.update(performance, observed_events)
+            if hasattr(self, "flow_telemetry"):
+                self.flow_telemetry.observe(supervisor)
             self.envelope = self._load_envelope()
+            self._crowd_observe_execution()
             self._maybe_schedule_human_replan()
             self._maybe_start_auto_chain()
+        if supervisor is None and hasattr(self, "flow_telemetry"):
+            self.flow_telemetry.observe(None)
         self._maintain_ready_buffer()
         self._maybe_start_continuity_guard(performance)
 
@@ -2980,6 +3053,12 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
             return payload
 
         def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/api/set-builder/saved":
+                self._json(200, {"playlists": store.set_builder.saved_sets()})
+                return
+            if self.path == "/api/adaptive/status":
+                self._json(200, store.crowd_snapshot())
+                return
             state, error = store.snapshot()
             if self.path == "/api/health":
                 self._json(
@@ -3018,6 +3097,23 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
                 self._json(400, {"error": str(error)})
                 return
+            if self.path.startswith("/api/adaptive/"):
+                origin = self.headers.get("Origin")
+                host = self.headers.get("Host", "").split(":")[0]
+                if host not in {"127.0.0.1", "localhost"} or (origin and origin not in {
+                    "http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:4173", "http://localhost:4173"
+                }):
+                    self._json(403, {"error": "Local dashboard origin required."})
+                    return
+                action = {"/api/adaptive/config": store.request_crowd_config,
+                          "/api/adaptive/heartbeat": store.request_crowd_heartbeat,
+                          "/api/adaptive/observation": store.request_crowd_observation}.get(self.path)
+                if action is None:
+                    self._json(404, {"error": "not found"})
+                else:
+                    status, result = action(payload)
+                    self._json(status, result)
+                return
             if self.path == "/api/plan":
                 status, payload = store.request_meta_plan()
                 self._json(status, payload)
@@ -3040,6 +3136,14 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/set-builder/build":
                 status, response = store.request_set_build(payload)
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/load":
+                status, response = store.request_load_saved_set(payload)
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/retry":
+                status, response = store.request_set_retry()
                 self._json(status, response)
                 return
             if self.path == "/api/set-builder/activate":
@@ -3065,6 +3169,8 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace-root", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT,
+                        help="Root for local-assets/ and artifacts/ (default: submission repository)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--duration", type=float)
     return parser.parse_args()
@@ -3073,12 +3179,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     workspace = args.workspace_root.resolve()
+    data_root = args.data_root.resolve()
+    os.environ["DJ_DATA_ROOT"] = str(data_root)
+    os.environ["DJ_RUNTIME_DIR"] = str(data_root / "artifacts/mixxx-runtime")
+    load_dotenv(data_root / ".env")
     mixxx_root = workspace / "experiments/mixxx-control"
     sys.path.insert(0, str(mixxx_root))
     from observer import run_observer
-    from probe import COMMAND_LOG, DEFAULT_ANALYSIS_ROOT, port_name
+    from probe import COMMAND_LOG, port_name
 
-    store = LiveStateStore(workspace)
+    store = LiveStateStore(workspace, data_root=data_root)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -3095,7 +3205,8 @@ def main() -> int:
     try:
         run_observer(
             port_name=port_name(),
-            analysis_root=DEFAULT_ANALYSIS_ROOT,
+            analysis_root=data_root / "artifacts/time-map",
+            refresh_catalog=True,
             command_log=COMMAND_LOG,
             duration=args.duration,
             on_update=store.update,

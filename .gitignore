@@ -10,3 +10,13 @@ __pycache__/
 vite.config.js
 vite.config.d.ts
 .DS_Store
+.local/
+
+# Private inputs and generated runs: retain only folder documentation.
+/local-assets/*
+!/local-assets/README.md
+!/local-assets/samples/
+/local-assets/samples/*
+!/local-assets/samples/README.md
+/artifacts/*
+!/artifacts/README.md

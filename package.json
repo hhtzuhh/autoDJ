@@ -4,10 +4,16 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "bridge": "../experiments/mixxx-control/.venv/bin/python backend/live_bridge.py",
+    "data:init": "python3 backend/local_data.py",
+    "data:fresh": "python3 backend/local_data.py --fresh",
     "dev": "vite",
+    "crowd": "node backend/crowd/server.mjs",
+    "test:crowd": "node --test backend/crowd/*.test.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "test:flow": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "react": "19.3.1",

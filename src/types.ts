@@ -37,6 +37,18 @@ export interface QueueItem extends Track {
 }
 
 export interface PreparedTrack {
+  analysisOrigin?: "cache" | "computed" | "available" | "pending" | "unknown";
+  analysisRun?: {
+    jobId: string;
+    buildId?: string | null;
+    engine: string;
+    runner: string;
+    status: "running" | "completed" | "failed" | "interrupted";
+    startedAt: string;
+    finishedAt: string | null;
+    durationSeconds: number | null;
+    neuralNet: "cache" | "computed" | "unverified";
+  } | null;
   id: string;
   title: string;
   artist: string;
@@ -107,7 +119,7 @@ export interface TransitionPlan {
   intent: string;
   confidence: number;
   reason: string;
-  selectedBy: "meta" | "deterministic_fallback" | "fixture";
+  selectedBy: "meta" | "deterministic_fallback" | "fixture" | null;
   model: string | null;
   queueRevision: number;
   performanceRevision: number;
@@ -117,7 +129,7 @@ export interface TransitionPlan {
   activeTransitionLocked?: boolean;
   metaCalls?: {
     id: string;
-    scope: "future_buffer" | "current_plan";
+    scope: "future_buffer" | "current_plan" | "crowd_adaptive";
     model: string;
     trackIds: string[];
     status: "calling" | "succeeded" | "timeout" | "failed" | "discarded";
@@ -175,7 +187,10 @@ export interface CopilotState {
   transitions: TransitionEdge[];
   plan: TransitionPlan;
   events: PerformanceEvent[];
+  flowTelemetry?: LiveFlowTelemetry;
   setBuilder?: {
+    buildId?: string;
+    curatorCalls?: CuratorCall[];
     status: "idle" | "curating" | "analyzing" | "planning" | "ready" | "blocked" | "error";
     prompt: string;
     model: string | null;
@@ -197,4 +212,46 @@ export interface CopilotState {
       playlist: string;
     } | null;
   };
+}
+
+export interface CuratorCall {
+  id?: string;
+  stage?: "curation" | "post_analysis";
+  buildId?: string;
+  model: string;
+  status: "calling" | "completed" | "failed" | "truncated";
+  attempt: number;
+  startedAt: string;
+  finishedAt?: string;
+  maxTokens: number;
+  responseSeconds?: number;
+  completionTokens?: number;
+  reasoningTokens?: number;
+}
+
+export interface LiveFlowTelemetry {
+  sessionId: string;
+  startedAt: number;
+  observerUpdatedAt: number | null;
+  ownedPlanId: string | null;
+  ownedPlanStatus: LifecycleStatus | null;
+  executorRunning: boolean;
+  continuousSetActive: boolean;
+  activationInProgress: boolean;
+  rotationInProgress: boolean;
+  completedTransitions: number;
+  lastExecution: {planId: string; status: LifecycleStatus; observedAt: number} | null;
+}
+
+export interface WebcamFlowState {
+  running: boolean;
+  starting: boolean;
+  stage: string;
+  error: string | null;
+  job: {id: string; status: string; stage: string; model?: string; modelSeconds?: number;
+    requestedAt?: string; finishedAt?: string; remoteFileCleanup?: string;
+    observation?: {summary_en: string}; cue?: {value: string}} | null;
+  adaptive: {enabled: boolean; status: string; reason: string;
+    decision?: {reason: string; planId: string; queueChanged: boolean; observationId: string};
+    lastApplied?: {reason: string; planId: string; executionStatus?: string; observationId: string}} | null;
 }

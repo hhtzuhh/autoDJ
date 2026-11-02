@@ -1,8 +1,13 @@
+import { AgentFlow } from "./AgentFlow";
+import type {BuildResult} from "./playlistRequest";
+import { CrowdWebcam } from "./CrowdWebcam";
 import { useEffect, useMemo, useState } from "react";
 import { event, initialState, tracks } from "./demo";
 import { MetaActivity } from "./MetaActivity";
+import { CrowdObservation } from "./CrowdObservation";
 import type {
   CopilotState,
+  WebcamFlowState,
   DeckState,
   LifecycleStatus,
   PerformanceEvent,
@@ -214,6 +219,11 @@ function TrackMini({ track }: { track: Track }) {
 }
 
 function PlanPanel({ state }: { state: CopilotState }) {
+  if (!state.plan.sourceTrackId || !state.plan.targetTrackId) return <section className="panel plan-panel">
+    <div className="panel__header"><div><span className="eyebrow">Before playback</span><h2>No active set yet</h2></div></div>
+    <p className="set-builder__message">Build a set from your local songs. After analysis finishes, export the Mixxx playlist and start the set to request its first transition plan.</p>
+    <MetaActivity state={state} />
+  </section>;
   const source = state.queue.find((track) => track.id === state.plan.sourceTrackId)!;
   const target = state.queue.find((track) => track.id === state.plan.targetTrackId)!;
   const isFixture = state.plan.selectedBy === "fixture";
@@ -383,14 +393,16 @@ function QueuePanel({
   onBuild,
   onReorder,
   onActivate,
+  onRetry,
   onStart,
 }: {
   state: CopilotState;
   disabled: boolean;
   notice: string | null;
-  onBuild: (prompt: string, count: number) => Promise<void>;
+  onBuild: (prompt: string, count: number) => Promise<BuildResult>;
   onReorder: (trackIds: string[]) => Promise<void>;
   onActivate: () => Promise<void>;
+  onRetry: () => Promise<void>;
   onStart: () => Promise<void>;
 }) {
   const [prompt, setPrompt] = useState("今天幫我排 10 首 house，能量慢慢往上");
@@ -470,12 +482,28 @@ function QueuePanel({
               onChange={(event) => setCount(Number(event.target.value))}
               disabled={disabled}
             />
+          </div>
+          <div className="set-builder__actions">
             <button
               className="button button--secondary"
               disabled={disabled || !prompt.trim()}
               onClick={() => void onBuild(prompt, count)}
             >
-              <Icon name="spark" /> Build with Meta
+              <Icon name="spark" /><span>Build {count} tracks with Meta</span>
+            </button>
+            <button
+              className="button button--secondary"
+              disabled={disabled || !builder?.activationReady}
+              onClick={() => void onActivate()}
+            >
+              <span>Export Mixxx playlist</span>
+            </button>
+            <button
+              className="button button--primary"
+              disabled={disabled || builder?.activation?.status !== "playlist_ready"}
+              onClick={() => void onStart()}
+            >
+              <Icon name="play" /><span>Start set</span>
             </button>
           </div>
           <div className="set-builder__status">
@@ -489,22 +517,11 @@ function QueuePanel({
               <strong>Analysis ready · executor pending</strong>
             )}
           </div>
-          <div className="set-builder__actions">
-            <button
-              className="button button--secondary"
-              disabled={disabled || !builder?.activationReady}
-              onClick={() => void onActivate()}
-            >
-              Prepare Mixxx set
+          {builder?.postAnalysisPlanning === "failed" && <div className="set-builder__retry">
+            <button className="button button--secondary" disabled={disabled} onClick={() => void onRetry()}>
+              Retry planning only
             </button>
-            <button
-              className="button button--primary"
-              disabled={disabled || builder?.activation?.status !== "playlist_ready"}
-              onClick={() => void onStart()}
-            >
-              <Icon name="play" /> Start set
-            </button>
-          </div>
+          </div>}
           {builderNotice && (
             <p className={builder?.error ? "set-builder__message is-error" : "set-builder__message"}>
               {builderNotice}
@@ -669,6 +686,14 @@ function EventLog({ events }: { events: PerformanceEvent[] }) {
 }
 
 function App() {
+  const [view, setView] = useState<"control" | "flow">(() => new URLSearchParams(window.location.search).get("view") === "flow" ? "flow" : "control");
+  const [webcamTelemetry, setWebcamTelemetry] = useState<WebcamFlowState | null>(null);
+  const switchView = (next: "control" | "flow") => {
+    setView(next);
+    const url = new URL(window.location.href);
+    if (next === "flow") url.searchParams.set("view", "flow"); else url.searchParams.delete("view");
+    window.history.replaceState(null, "", url);
+  };
   const [state, setState] = useState<CopilotState>(initialState);
   const [isReplanning, setIsReplanning] = useState(false);
   const [bridgeError, setBridgeError] = useState<string | null>(null);
@@ -736,6 +761,7 @@ function App() {
       } catch (error) {
         if (!cancelled) {
           setBridgeError(error instanceof Error ? error.message : String(error));
+          setState(current => ({...current, connected: false}));
         }
       }
     };
@@ -936,7 +962,7 @@ function App() {
     }
   };
 
-  const buildSet = async (prompt: string, count: number) => {
+  const buildSet = async (prompt: string, count: number): Promise<BuildResult> => {
     setActionPending(true);
     setActionNotice("Meta is curating the bounded local catalog…");
     try {
@@ -948,11 +974,28 @@ function App() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? `Bridge returned ${response.status}`);
       setActionNotice("Queue accepted. Track and adjacent-pair analysis is running in the background.");
+      return {ok: true, buildId: payload.buildId};
     } catch (error) {
-      setActionNotice(`Rejected: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      setActionNotice(`Rejected: ${message}`);
+      return {ok: false, error: message};
     } finally {
       setActionPending(false);
     }
+  };
+
+  const retrySetPlanning = async () => {
+    setActionPending(true);
+    try {
+      const response = await fetch("http://127.0.0.1:8765/api/set-builder/retry", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Could not retry planning");
+      setActionNotice("Retrying Meta planning using completed analyses…");
+    } catch (error) {
+      setActionNotice(`Rejected: ${error instanceof Error ? error.message : String(error)}`);
+    } finally { setActionPending(false); }
   };
 
   const reorderSet = async (orderedTrackIds: string[]) => {
@@ -1008,7 +1051,7 @@ function App() {
         </div>
         <div className="topbar__status">
           <span className={`source-badge source-badge--${state.dataSource}`}>
-            <i /> {state.dataSource === "live" ? "Live Mixxx" : "Simulation"}
+            <i /> {state.dataSource === "live" ? "Live Mixxx" : "DJ simulation"}
           </span>
           <span className={`connection ${state.connected ? "" : "is-off"}`}>
             <i /> {state.connected ? "State connected" : "Disconnected"}
@@ -1024,6 +1067,20 @@ function App() {
             <span>{bridgeError}</span>
           </div>
         )}
+        <nav className="view-tabs" role="tablist" aria-label="Dashboard view" onKeyDown={event => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          const next = event.key === "Home" ? "control" : event.key === "End" ? "flow" : view === "control" ? "flow" : "control";
+          switchView(next);
+          event.currentTarget.querySelectorAll<HTMLButtonElement>("button")[next === "control" ? 0 : 1].focus();
+        }}>
+          <button id="control-tab" role="tab" aria-controls="control-view" aria-selected={view === "control"} tabIndex={view === "control" ? 0 : -1} onClick={() => switchView("control")}>Control room</button>
+          <button id="flow-tab" role="tab" aria-controls="flow-view" aria-selected={view === "flow"} tabIndex={view === "flow" ? 0 : -1} onClick={() => switchView("flow")}>Agent flow</button>
+        </nav>
+        <div id="flow-view" role="tabpanel" aria-labelledby="flow-tab" hidden={view !== "flow"}>
+          <AgentFlow state={state} webcam={webcamTelemetry} disconnected={Boolean(bridgeError) || (liveRequested && state.dataSource !== "live")} active={view === "flow"} disabled={actionPending || state.plan.status === "executing"} onBuild={buildSet} />
+        </div>
+        <div id="control-view" role="tabpanel" aria-labelledby="control-tab" hidden={view !== "control"}>
         <section className="hero-strip">
           <span className="eyebrow">Live control room</span>
           <div className="cue-countdown">
@@ -1048,9 +1105,13 @@ function App() {
             onBuild={buildSet}
             onReorder={reorderSet}
             onActivate={() => sendSetAction("activate")}
+            onRetry={retrySetPlanning}
             onStart={() => sendSetAction("start")}
           />
           <EventLog events={state.events} />
+        </div>
+        <CrowdWebcam live={state.dataSource === "live" && state.connected} tracks={state.queue} onTelemetry={setWebcamTelemetry} />
+        <CrowdObservation />
         </div>
       </main>
 
@@ -1062,7 +1123,7 @@ function App() {
               ? state.autoArmEnabled
                 ? "The target is three future-ready transitions. Ready transitions auto-arm after deck rotation."
                 : "The target is three future-ready transitions. Every ready transition waits for human approval."
-              : "Every action is labeled simulation until the live adapter is connected."}
+              : "DJ controls are simulated. Crowd observation uses real Meta requests for uploads and while webcam capture is on. Adaptive DJ requires Live Mixxx."}
           </p>
           {state.dataSource === "live" && actionNotice && (
             <small className="action-notice">{actionNotice}</small>
@@ -1106,7 +1167,7 @@ function App() {
             </button>
             <button
               className="button button--secondary"
-              disabled={actionPending || state.plan.status === "executing"}
+              disabled={actionPending || state.queue.length < 2 || state.plan.status === "executing"}
               onClick={() => void sendLiveAction("plan")}
             >
               <Icon name="spark" /> Plan with Meta

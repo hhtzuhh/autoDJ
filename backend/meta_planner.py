@@ -336,6 +336,7 @@ def prompt_for(
     queue_revision: int,
     intent: Intent,
     track_ids: tuple[str, ...],
+    crowd_context: dict[str, Any] | None = None,
 ) -> str:
     if not candidates:
         raise ValueError("no feasible A-B-C candidates")
@@ -350,6 +351,7 @@ def prompt_for(
                 for index, track_id in enumerate(track_ids)
             },
             "candidate_data": bounded,
+            **({"crowd_context": crowd_context} if crowd_context is not None else {}),
             "required_output_fields": [
                 "selected_candidate_id",
                 "intent",
@@ -423,6 +425,10 @@ def validate_decision(
     return candidate
 
 
+class MetaOutputLimitError(RuntimeError):
+    """A truncated response; callers must never accept its partial content."""
+
+
 class OpenAICompatibleTransport:
     def __init__(self, config: MetaConfig, *, on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.config = config
@@ -472,7 +478,7 @@ class OpenAICompatibleTransport:
         try:
             choice = payload["choices"][0]
             if choice.get("finish_reason") == "length":
-                raise RuntimeError("Meta output token limit reached; no plan accepted")
+                raise MetaOutputLimitError("Meta output token limit reached; no plan accepted")
             content = choice["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise RuntimeError("Meta API response did not contain assistant text")
@@ -489,12 +495,14 @@ def select_with_meta(
     track_ids: tuple[str, ...],
     model: str,
     transport: Callable[[str, str], str],
+    crowd_context: dict[str, Any] | None = None,
 ) -> MetaSelection:
     user_prompt = prompt_for(
         candidates,
         queue_revision=queue_revision,
         intent=intent,
         track_ids=track_ids,
+        crowd_context=crowd_context,
     )
     response = transport(SYSTEM_INSTRUCTION, user_prompt)
     decision = parse_decision(response)

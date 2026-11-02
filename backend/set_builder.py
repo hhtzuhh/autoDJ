@@ -7,17 +7,19 @@ plan lifecycle once every required track and adjacent edge is ready.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
+import os
 from pathlib import Path
 import queue
 import re
 import subprocess
 import threading
+import time
 from typing import Any, Callable, Iterable
 
-from meta_planner import MetaConfig, OpenAICompatibleTransport
+from meta_planner import MetaConfig, MetaOutputLimitError, OpenAICompatibleTransport
 from pair_analyzer import PAIR_VERSION
 from transition_pipeline import AnalysisCatalog, PairAnalysisCache, adjacent_pairs, utc_now
 
@@ -29,6 +31,9 @@ requested number of supplied track IDs. Prefer tracks matching the request,
 then create a coherent energy arc using only the provided metadata. Never
 invent IDs or facts. Return exactly one JSON object with only
 ordered_track_ids and reason. ordered_track_ids must contain unique IDs.
+Use track_count as the exact requested count; request prose may contain an old
+count. Keep reason to one concise sentence, at most 500 characters. Prefer a
+simple feasible ordering; do not enumerate permutations or write an essay.
 """.strip()
 
 
@@ -192,21 +197,25 @@ class SetBuilderService:
         workspace: Path,
         *,
         library_root: Path | None = None,
+        data_root: Path | None = None,
         metadata_reader: Callable[[Path], dict[str, Any]] = probe_audio,
         curator: Callable[[tuple[CatalogTrack, ...], str, int], tuple[tuple[str, ...], str]] | None = None,
         post_curator: Callable[[tuple[CatalogTrack, ...], str, int], tuple[tuple[str, ...], str]] | None = None,
-        analyzer: Callable[[CatalogTrack], None] | None = None,
+        analyzer: Callable[[CatalogTrack], dict[str, Any] | None] | None = None,
         pair_builder: Callable[[str, str], int | tuple[int, str | None]] | None = None,
         start_worker: bool = True,
     ) -> None:
         self.workspace = workspace.resolve()
-        self.library_root = (library_root or workspace / "local-assets/samples").resolve()
-        self.analysis_root = workspace / "artifacts/time-map"
-        self.pair_root = workspace / "artifacts/live-performance/dashboard-pairs"
-        self.state_path = workspace / "artifacts/live-performance/set-builder-state-v1.json"
+        self.data_root = (data_root or workspace).resolve()
+        self.library_root = (library_root or self.data_root / "local-assets/samples").resolve()
+        self.analysis_root = self.data_root / "artifacts/time-map"
+        self.pair_root = self.data_root / "artifacts/live-performance/dashboard-pairs"
+        self.state_path = self.data_root / "artifacts/live-performance/set-builder-state-v1.json"
+        self.saved_root = self.data_root / "artifacts/live-performance/saved-sets"
         self.lock = threading.RLock()
         self.jobs: queue.Queue[tuple[str, ...]] = queue.Queue()
         self.queued_jobs: set[tuple[str, ...]] = set()
+        self.metadata_reader = metadata_reader
         self.catalog = scan_catalog(
             self.library_root,
             self.analysis_root,
@@ -215,6 +224,7 @@ class SetBuilderService:
         self.curator = curator or self._meta_curator
         self.post_curator = post_curator or self._meta_post_curator
         self.analyzer = analyzer or self._run_analyzer
+        self.analysis_engine = "custom" if analyzer else "all_in_one_plus_dsp"
         self.pair_builder = pair_builder or self._build_pair
         self.state = self._initial_state()
         if self.state["orderedTrackIds"]:
@@ -233,6 +243,9 @@ class SetBuilderService:
             "queueRevision": 0,
             "orderedTrackIds": [],
             "trackStatuses": {track_id: track.analysis_status for track_id, track in self.catalog.items()},
+            "analysisOrigins": {track_id: "available" if track.analysis_status == "ready" else "pending"
+                                for track_id, track in self.catalog.items()},
+            "analysisRuns": {},
             "transitions": [],
             "updatedAt": utc_now(),
             "activationReady": False,
@@ -246,6 +259,9 @@ class SetBuilderService:
             if saved_ids and all(track_id in self.catalog for track_id in saved_ids):
                 pair_version_changed = saved.get("pairAnalysisVersion") != PAIR_VERSION
                 state.update(saved)
+                for run in state.get("analysisRuns", {}).values():
+                    if run.get("status") == "running":
+                        run["status"] = "interrupted"
                 state["pairAnalysisVersion"] = PAIR_VERSION
                 state["trackStatuses"] = {
                     track_id: self.catalog[track_id].analysis_status for track_id in self.catalog
@@ -262,33 +278,63 @@ class SetBuilderService:
         return state
 
     def _meta_curator(
-        self, tracks: tuple[CatalogTrack, ...], prompt: str, count: int
+        self, tracks: tuple[CatalogTrack, ...], prompt: str, count: int, *, stage: str = "curation"
     ) -> tuple[tuple[str, ...], str]:
         from meta_planner import load_dotenv
 
+        load_dotenv(self.data_root / ".env")
         load_dotenv(self.workspace / "submission/.env")
         load_dotenv(self.workspace / ".env")
         load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
-        config = MetaConfig.from_environment()
-        ordered, reason = curate_with_meta(
-            tracks,
-            prompt=prompt,
-            count=count,
-            model=config.model,
-            transport=OpenAICompatibleTransport(config),
-        )
-        self.state["model"] = config.model
-        return ordered, reason
+        # Preparation has no live cue deadline. Do not raise the rolling
+        # transition planner's global budget or add retries to its transport.
+        config = replace(MetaConfig.from_environment(),
+            max_tokens=int(os.environ.get("META_CURATOR_MAX_TOKENS", "4096")),
+            timeout_seconds=float(os.environ.get("META_CURATOR_TIMEOUT_SECONDS", "60")))
+        attempts = [config]
+        if config.max_tokens < 8192:
+            attempts.append(replace(config, max_tokens=min(8192, config.max_tokens * 2)))
+        for index, attempt in enumerate(attempts):
+            call = {"id": f"curator-{time.time_ns()}", "stage": stage,
+                    "buildId": self.state.get("buildId"), "attempt": index + 1, "model": attempt.model, "maxTokens": attempt.max_tokens,
+                    "reasoningEffort": attempt.reasoning_effort, "startedAt": utc_now(), "status": "calling"}
+            with self.lock:
+                self.state["curatorCalls"] = [*self.state.get("curatorCalls", []), call][-6:]
+            def record(event):
+                with self.lock:
+                    call.update(event)
+            try:
+                result = curate_with_meta(tracks, prompt=prompt, count=count, model=attempt.model,
+                    transport=OpenAICompatibleTransport(attempt, on_event=record))
+            except MetaOutputLimitError:
+                record({"status": "truncated", "finishedAt": utc_now()})
+                if index + 1 == len(attempts):
+                    raise
+            except Exception:
+                record({"status": "failed", "finishedAt": utc_now()})
+                raise
+            else:
+                record({"status": "completed", "finishedAt": utc_now()})
+                with self.lock:
+                    self.state["model"] = attempt.model
+                return result
+        raise RuntimeError("Meta curator did not complete")
 
-    def _run_analyzer(self, track: CatalogTrack) -> None:
+    def _run_analyzer(self, track: CatalogTrack) -> dict[str, Any]:
         python = self.workspace / "experiments/time-map/.venv/bin/python"
         script = self.workspace / "experiments/time-map/unified_analysis.py"
         output = self.analysis_root / track.id / "track-analysis-v1.json"
-        subprocess.run(
-            [str(python), str(script), str(track.path), "--output", str(output), "--device", "cpu", "--limit", "5"],
-            check=True,
-            cwd=str(script.parent),
-        )
+        # All-In-One itself reuses source.json unless --overwrite is requested.
+        # Running unified_analysis.py therefore does not always run the network.
+        neural_cached = (self.analysis_root / track.id / "allin1-raw/source.json").is_file()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with (output.parent / "analyzer.log").open("a", encoding="utf-8") as log:
+            subprocess.run(
+                [str(python), str(script), str(track.path), "--output", str(output),
+                 "--work-directory", str(output.parent), "--device", "cpu", "--limit", "5"],
+                check=True, cwd=str(output.parent), stdout=log, stderr=subprocess.STDOUT,
+            )
+        return {"neuralNet": "cache" if neural_cached else "computed"}
 
     @staticmethod
     def _tempo_compatible(source: CatalogTrack, target: CatalogTrack) -> bool:
@@ -320,7 +366,7 @@ class SetBuilderService:
             "make a fully compatible ordering impossible; do not invent compatibility. "
             f"compatible_followers={json.dumps(compatibility, separators=(',', ':'))}"
         )
-        return self._meta_curator(tracks, request, count)
+        return self._meta_curator(tracks, request, count, stage="post_analysis")
 
     def _build_pair(self, source_id: str, target_id: str) -> tuple[int, str | None]:
         catalog = AnalysisCatalog.from_root(self.analysis_root)
@@ -340,6 +386,64 @@ class SetBuilderService:
             encoding="utf-8",
         )
         temporary.replace(self.state_path)
+        if self.state.get("status") == "ready" and self.state.get("activationReady") and not self.state.get("loadedFromSavedSet"):
+            build_id = self.state.get("buildId")
+            if build_id and re.fullmatch(r"build-\d+", build_id):
+                self.saved_root.mkdir(parents=True, exist_ok=True)
+                saved = self.saved_root / f"{build_id}-q{int(self.state['queueRevision'])}.json"
+                if not saved.exists():
+                    payload = {"id": saved.stem, "savedAt": utc_now(), "state": self.state,
+                               "analysisKeys": {t: json.loads((self.analysis_root / t / "track-analysis-v1.json").read_text())["analysis_cache_key"] for t in self.state["orderedTrackIds"]},
+                               "tracks": [self.catalog[t].public() for t in self.state["orderedTrackIds"]]}
+                    pending = saved.with_suffix(".json.tmp")
+                    pending.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    pending.replace(saved)
+
+    def saved_sets(self) -> list[dict[str, Any]]:
+        result = []
+        for path in sorted(self.saved_root.glob("build-*-q*.json"), reverse=True):
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                state = saved["state"]
+                ids = state["orderedTrackIds"]
+                available = all(t in self.catalog and (self.analysis_root / t / "track-analysis-v1.json").is_file() for t in ids)
+                result.append({"id": path.stem, "savedAt": saved["savedAt"], "prompt": state["prompt"],
+                               "trackCount": len(ids), "tracks": saved["tracks"], "available": available,
+                               "reason": None if available else "A song or its analysis is missing from this local library."})
+            except (KeyError, TypeError, ValueError, OSError):
+                continue
+        return result
+
+    def load_saved_set(self, saved_id: str) -> dict[str, Any]:
+        if not re.fullmatch(r"build-\d+-q\d+", saved_id):
+            raise ValueError("Invalid saved playlist ID")
+        with self.lock:
+            if self.state.get("status") in {"curating", "analyzing", "planning"} or self.queued_jobs:
+                raise ValueError("Wait for current preparation to finish before loading a playlist")
+            path = self.saved_root / f"{saved_id}.json"
+            if not path.is_file():
+                raise ValueError("Saved playlist was not found")
+            record = json.loads(path.read_text(encoding="utf-8"))
+            saved = record["state"]
+            catalog = scan_catalog(self.library_root, self.analysis_root, metadata_reader=self.metadata_reader)
+            ids = saved["orderedTrackIds"]
+            if len(ids) < 2 or len(set(ids)) != len(ids) or any(t not in catalog or catalog[t].analysis_status != "ready" for t in ids):
+                raise ValueError("Saved playlist requires songs and analyses that are no longer available")
+            if saved.get("pairAnalysisVersion") != PAIR_VERSION:
+                raise ValueError("Saved playlist uses an older analysis version; build a new playlist")
+            keys = {t: json.loads((self.analysis_root / t / "track-analysis-v1.json").read_text())["analysis_cache_key"] for t in ids}
+            if record.get("analysisKeys") != keys:
+                raise ValueError("Analysis changed since this playlist was saved; build a new playlist")
+            self.catalog = catalog
+            self.state = {**saved, "queueRevision": int(self.state["queueRevision"]) + 1,
+                          "loadedFromSavedSet": saved_id, "analysisOrigins": {t: "cache" for t in ids},
+                          "analysisRuns": {}, "trackStatuses": {t: track.analysis_status for t, track in catalog.items()},
+                          "transitions": [], "error": None}
+            self._refresh_edges()
+            self._schedule_current()
+            self._recompute_status()
+            self._persist()
+            return self.snapshot()
 
     def _edge(self, source_id: str, target_id: str, status: str = "pending") -> dict[str, Any]:
         current_state = getattr(self, "state", {})
@@ -430,11 +534,10 @@ class SetBuilderService:
         needs_post_plan = any(
             edge.get("reason") == "clean_break_required" for edge in self.state["transitions"]
         )
-        post_plan_ready = (
-            not needs_post_plan
-            or self.state.get("postAnalysisPlanning") in {"completed", "failed"}
+        post_plan_ready = self.state.get("postAnalysisPlanning") not in {"running", "failed"} and (
+            not needs_post_plan or self.state.get("postAnalysisPlanning") == "completed"
         )
-        preparation_ready = tracks_ready and edges_ready and post_plan_ready
+        preparation_ready = tracks_ready and edges_ready and post_plan_ready and not self.state.get("error")
         self.state["preparationReady"] = preparation_ready
         self.state["activationReady"] = preparation_ready
         if self.state.get("error"):
@@ -467,6 +570,8 @@ class SetBuilderService:
         if count > len(candidates):
             raise ValueError(f"catalog contains only {len(candidates)} tracks")
         with self.lock:
+            self.state["buildId"] = f"build-{time.time_ns()}"
+            self.state.pop("loadedFromSavedSet", None)
             self.state["status"] = "curating"
             self.state["error"] = None
             self.state["prompt"] = prompt
@@ -482,6 +587,8 @@ class SetBuilderService:
         with self.lock:
             self.state["queueRevision"] = int(self.state["queueRevision"]) + 1
             self.state["orderedTrackIds"] = list(ordered)
+            self.state["analysisOrigins"] = {t: "cache" if self.catalog[t].analysis_status == "ready" else "pending" for t in ordered}
+            self.state["analysisRuns"] = {}
             self.state["reason"] = reason
             self.state["error"] = None
             self.state["transitions"] = []
@@ -508,6 +615,7 @@ class SetBuilderService:
             }
             self.state["queueRevision"] = int(self.state["queueRevision"]) + 1
             self.state["orderedTrackIds"] = list(requested)
+            self.state.pop("loadedFromSavedSet", None)
             self.state["transitions"] = []
             for source_id, target_id in adjacent_pairs(requested):
                 retained = old_edges.get((source_id, target_id))
@@ -517,6 +625,21 @@ class SetBuilderService:
             self._refresh_edges()
             self.state["error"] = None
             self._schedule_current()
+            self._recompute_status()
+            self._persist()
+            return self.snapshot()
+
+    def retry_post_plan(self) -> dict[str, Any]:
+        """Resume only the failed curation pass; keep analyses and active playback."""
+        with self.lock:
+            ordered = self.state["orderedTrackIds"]
+            if (self.state.get("postAnalysisPlanning") != "failed" or not ordered
+                or any(self.state["trackStatuses"].get(t) != "ready" for t in ordered)
+                or ("post_plan",) in self.queued_jobs):
+                raise ValueError("No settled, failed post-analysis plan is available to retry.")
+            self.state["postAnalysisPlanning"] = "pending"
+            self.state["error"] = None
+            self._enqueue(("post_plan",))
             self._recompute_status()
             self._persist()
             return self.snapshot()
@@ -531,6 +654,8 @@ class SetBuilderService:
                     {
                         **self.catalog[track_id].public(),
                         "analysisStatus": self.state["trackStatuses"].get(track_id, "pending"),
+                        "analysisOrigin": self.state.get("analysisOrigins", {}).get(track_id, "unknown"),
+                        "analysisRun": json.loads(json.dumps(self.state.get("analysisRuns", {}).get(track_id))),
                     }
                     for track_id in ordered
                 ],
@@ -556,11 +681,20 @@ class SetBuilderService:
             if track_id not in self.state["orderedTrackIds"]:
                 return
             self.state["trackStatuses"][track_id] = "analyzing"
+            run = {"jobId": f"analysis-{time.time_ns()}", "buildId": self.state.get("buildId"),
+                   "engine": self.analysis_engine, "runner": "local_cpu" if self.analysis_engine == "all_in_one_plus_dsp" else "custom",
+                   "status": "running", "startedAt": utc_now(), "finishedAt": None,
+                   "durationSeconds": None, "neuralNet": "unverified"}
+            self.state.setdefault("analysisRuns", {})[track_id] = run
+            started = time.monotonic()
             self._recompute_status()
             self._persist()
         try:
-            self.analyzer(self.catalog[track_id])
+            result = self.analyzer(self.catalog[track_id])
             with self.lock:
+                run.update(status="completed", finishedAt=utc_now(), durationSeconds=round(time.monotonic() - started, 3))
+                if isinstance(result, dict) and result.get("neuralNet") in {"cache", "computed"}:
+                    run["neuralNet"] = result["neuralNet"]
                 original = self.catalog[track_id]
                 analysis_path = self.analysis_root / track_id / "track-analysis-v1.json"
                 analysis = json.loads(analysis_path.read_text(encoding="utf-8")) if analysis_path.exists() else {}
@@ -573,11 +707,13 @@ class SetBuilderService:
                     }
                 )
                 self.state["trackStatuses"][track_id] = "ready"
+                self.state.setdefault("analysisOrigins", {})[track_id] = "computed" if run["buildId"] == self.state.get("buildId") else "cache"
                 self._schedule_current()
                 self._recompute_status()
                 self._persist()
         except Exception as error:
             with self.lock:
+                run.update(status="failed", finishedAt=utc_now(), durationSeconds=round(time.monotonic() - started, 3))
                 self.state["trackStatuses"][track_id] = "failed"
                 self.state["error"] = f"{self.catalog[track_id].title}: {error}"
                 self._recompute_status()
@@ -618,6 +754,7 @@ class SetBuilderService:
             if self.state.get("postAnalysisPlanning") not in {"idle", "pending"}:
                 return
             current = tuple(str(value) for value in self.state["orderedTrackIds"])
+            revision = int(self.state["queueRevision"])
             before_blocked = self._blocked_count(current)
             self.state["postAnalysisPlanning"] = "running"
             self._recompute_status()
@@ -632,6 +769,8 @@ class SetBuilderService:
                     f"post-analysis order made tempo bridges worse ({before_blocked} → {after_blocked})"
                 )
             with self.lock:
+                if int(self.state["queueRevision"]) != revision or tuple(self.state["orderedTrackIds"]) != current:
+                    return
                 self.state["postAnalysisPlanning"] = "completed"
                 self.state["reason"] = reason
                 self.state["error"] = None
@@ -642,6 +781,8 @@ class SetBuilderService:
                     self._persist()
         except Exception as error:
             with self.lock:
+                if int(self.state["queueRevision"]) != revision or tuple(self.state["orderedTrackIds"]) != current:
+                    return
                 self.state["postAnalysisPlanning"] = "failed"
                 self.state["error"] = f"post-analysis Meta planning failed: {error}"
                 self._recompute_status()
