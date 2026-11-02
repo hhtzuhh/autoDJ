@@ -1,9 +1,10 @@
 import {useEffect, useMemo, useState} from "react";
-import {analysisTrackRows, deriveAgentFlow} from "./flowProjection";
+import {deriveAgentFlow} from "./flowProjection";
 import type {FlowNode} from "./flowProjection";
 import type {CopilotState, WebcamFlowState} from "./types";
 import "./agent-flow.css";
 import {PlaylistDialog} from "./PlaylistDialog";
+import {LibraryDialog} from "./LibraryDialog";
 import type {BuildResult} from "./playlistRequest";
 
 function FlowStep({item, number, selected, onSelect}: {item: FlowNode; number: number; selected: boolean; onSelect: () => void}) {
@@ -12,21 +13,28 @@ function FlowStep({item, number, selected, onSelect}: {item: FlowNode; number: n
     <span className="flow-node__top"><span className="flow-node__number">{String(number).padStart(2, "0")}</span><span className="flow-light" /></span>
     <span className="flow-node__owner">{item.owner}</span>
     <strong>{item.title}</strong>
+    {item.id === "library" && <span className="flow-node__action">View all songs ↗</span>}
+    {item.id === "analysis" && <span className="flow-node__action">Review / analyze songs ↗</span>}
     {item.id === "curation" && <span className="flow-node__action">Build / choose playlist ↗</span>}
     <span className="flow-node__status">{item.label}</span>
   </button>;
 }
 function Lane({nodes, selected, setSelected, name}: {nodes: FlowNode[]; selected: string; setSelected: (id: string) => void; name: string}) {
-  return <div className={`flow-lane flow-lane--${name}`}>
+  return <div className={`flow-lane flow-lane--${name} ${nodes.length === 3 ? "flow-lane--three" : ""}`}>
     {nodes.map((item, index) => <FlowStep key={item.id} item={item} number={index + 1} selected={selected === item.id} onSelect={() => setSelected(item.id)} />)}
   </div>;
 }
 const time = (at: number) => Number.isFinite(at) ? new Date(at).toLocaleTimeString([], {hour12: false}) : "—";
 
-export function AgentFlow({state, webcam, disconnected, active, disabled, onBuild}: {state: CopilotState; webcam: WebcamFlowState | null; disconnected: boolean; active: boolean; disabled: boolean; onBuild: (prompt: string, count: number) => Promise<BuildResult>}) {
+export function AgentFlow({state, webcam, disconnected, active, disabled, onBuild, onAnalyze}: {state: CopilotState; webcam: WebcamFlowState | null; disconnected: boolean; active: boolean; disabled: boolean; onBuild: (prompt: string, count: number) => Promise<BuildResult>; onAnalyze: (trackIds: string[]) => Promise<BuildResult>}) {
   const [selected, setSelected] = useState("analysis");
   const [playlistOpen, setPlaylistOpen] = useState(false);
-  const selectNode = (id: string) => {setSelected(id); if (id === "curation") setPlaylistOpen(true);};
+  const [libraryPanel, setLibraryPanel] = useState<"library" | "analysis" | null>(null);
+  const selectNode = (id: string) => {
+    setSelected(id);
+    if (id === "curation") setPlaylistOpen(true);
+    if (id === "library" || id === "analysis") setLibraryPanel(id);
+  };
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!active) return;
@@ -37,7 +45,6 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
   const flow = useMemo(() => deriveAgentFlow(state, webcam, disconnected, now), [state, webcam, disconnected, now]);
   const detail = [...flow.preparation, ...flow.liveNodes, ...flow.crowd].find(n => n.id === selected)!;
   const inFlight = flow.records.filter(c => c.status === "calling");
-  const analysisRows = analysisTrackRows(state.dataSource === "live" ? state.setBuilder?.queue ?? [] : []);
   return <div className="agent-flow">
     <section className="flow-intro">
       <div><span className="eyebrow">Full-stack execution map</span><h1>Inside the AI DJ</h1>
@@ -57,24 +64,10 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
       <span className="flow-legend__hint">Select a node to inspect its evidence</span>
     </div>
     <section className="flow-section" aria-labelledby="preparation-flow-title">
-      <div className="flow-section__heading"><div><span className="flow-section__index">01</span><h2 id="preparation-flow-title">Before playback</h2></div><span>Build → Export → Start in Control room</span></div>
+      <div className="flow-section__heading"><div><span className="flow-section__index">01</span><h2 id="preparation-flow-title">Analyze first, then select</h2></div><span>Local library → Analyze → Meta selection</span></div>
       <Lane nodes={flow.preparation} selected={selected} setSelected={selectNode} name="prepare" />
-      <p className="flow-section__note">Existing audio analysis can be reused. The optional order-refinement pass may create new adjacent pairs; those pairs are checked again.</p>
-      {selected === "analysis" && <div className="flow-track-analysis">
-        <div className="flow-section__heading"><h2>Selected tracks · analysis source</h2>
-          <span>{analysisRows.length} selected · {analysisRows.filter(r => r.route === "metadata").length} existing metadata · {analysisRows.filter(r => r.route === "neural").length} confirmed neural runs</span></div>
-        <p className="flow-section__note">Analysis metadata contains measured beats, structure and audio features, beyond title/artist tags. Each row follows one track; the current worker runs locally, one job at a time.</p>
-        {disconnected && <p className="flow-section__note">Disconnected · showing last known track evidence.</p>}
-        {!analysisRows.length ? <p className="flow-empty">Build a set in live mode to inspect the selected tracks.</p> : <div className="flow-track-table-scroll"><table className="flow-track-table">
-          <thead><tr><th scope="col"># / Track</th><th scope="col">Analysis source</th><th scope="col">Status</th><th scope="col">Execution</th></tr></thead>
-          <tbody>{analysisRows.map(({track, index, run, source, note}) => <tr key={track.id}>
-            <td><strong>{String(index + 1).padStart(2, "0")} · {track.title}</strong><small>{track.artist || "Unknown artist"}</small></td>
-            <td><strong>{source}</strong><small>{note}</small></td>
-            <td><span className={`flow-track-status flow-track-status--${track.analysisStatus}`}>{track.analysisStatus}</span>{track.bpm > 0 && <small>{track.bpm.toFixed(1)} BPM</small>}</td>
-            <td>{run ? <><strong>{run.runner === "local_cpu" ? "Local CPU" : run.runner}</strong><small>{run.durationSeconds != null ? `${run.durationSeconds.toFixed(1)}s` : run.status === "running" && !disconnected ? `${Math.max(0, (now - Date.parse(run.startedAt)) / 1000).toFixed(0)}s elapsed` : run.status}</small><code>{run.jobId}</code></> : <small>{track.analysisOrigin === "cache" ? "No new job" : "No recorded job"}</small>}</td>
-          </tr>)}</tbody>
-        </table></div>}
-      </div>}
+      <p className="flow-section__note">All library tracks must finish analysis before Meta selects a playlist. Existing results can be reused. This stage ends at song selection and order; transition preparation is paused.</p>
+
     </section>
     <section className="flow-section flow-section--loop" aria-labelledby="live-flow-title">
       <div className="flow-section__heading"><div><span className="flow-section__index">02</span><h2 id="live-flow-title">The live agent loop</h2></div><span>Triggered by state changes · no continuous LLM polling</span></div>
@@ -105,6 +98,7 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
         <p className="flow-section__note">Completed API requests are not completed audio transitions. Old preparation records can survive a bridge restart.</p>
       </section>
     </div>
+    <LibraryDialog open={libraryPanel !== null && active} mode={libraryPanel ?? "library"} onClose={() => setLibraryPanel(null)} state={state} disabled={disabled || disconnected} disconnected={disconnected} now={now} onAnalyze={onAnalyze} />
     <PlaylistDialog open={playlistOpen && active} onClose={() => setPlaylistOpen(false)} state={state} disabled={disabled || disconnected} onBuild={onBuild} />
   </div>;
 }

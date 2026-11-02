@@ -32,7 +32,8 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
   const telemetry = state.flowTelemetry;
   const fresh = live && state.connected && !disconnected && telemetry?.observerUpdatedAt != null
     && now - telemetry.observerUpdatedAt < 10_000;
-  const tracks = b?.queue ?? [];
+  const selectedTracks = b?.queue ?? [];
+  const tracks = b?.library ?? selectedTracks;
   const readyTracks = tracks.filter(t => t.analysisStatus === "ready");
   const runningTracks = tracks.filter(t => t.analysisStatus === "analyzing");
   const failedTracks = tracks.filter(t => t.analysisStatus === "failed");
@@ -52,13 +53,13 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
   const preparation = [
     node("library", "Local library", "FILES + METADATA", b ? "done" : "idle", b ? `${b.catalogCount} tracks available` : "Waiting for library",
       "Reads local audio identities and file tags. Unknown genres remain unknown.", {catalogCount: b?.catalogCount ?? null, fields: ["title", "artist", "genre", "duration", "known BPM", "analysis status"]}),
-    node("curation", "Select & order", "META · MUSE SPARK", preparing ? "running" : curation?.status === "failed" || curation?.status === "truncated" ? "error" : tracks.length ? "done" : "idle",
-      preparing ? "Selecting tracks…" : tracks.length ? `${tracks.length} tracks selected` : "Waiting for Build",
-      "Initial curation uses catalog metadata and known BPM, not full audio or the detailed energy curve.", {request: b?.prompt, reason: b?.reason, call: curation ?? null, provenance: curation ? "recorded_call" : tracks.length ? "saved_preparation" : "unavailable"}),
-    node("analysis", "Analyze audio", "ALL-IN-ONE + LOCAL DSP", preparing ? "waiting" : failedTracks.length ? "error" : runningTracks.length ? "running" : readyTracks.length && readyTracks.length === tracks.length ? "done" : tracks.length ? "waiting" : "idle",
+    node("curation", "Select & order", "META · MUSE SPARK", preparing ? "running" : b?.error ? "error" : b?.buildPhase === "library_analysis" ? "waiting" : curation?.status === "failed" || curation?.status === "truncated" ? "error" : selectedTracks.length ? "done" : "idle",
+      preparing ? "Selecting tracks…" : b?.error ? "Build blocked" : b?.buildPhase === "library_analysis" ? "Waiting for library analysis" : selectedTracks.length ? `${selectedTracks.length} tracks selected` : "Build / choose playlist",
+      "Meta receives the analyzed library: measured BPM, structure and DSP summaries. Genre is from file tags; relative energy is not a cross-song energy ranking.", {request: b?.prompt, reason: b?.reason, call: curation ?? null, error: b?.error, selected: selectedTracks.map(t => t.title)}),
+    node("analysis", "Analyze library", "ALL-IN-ONE + LOCAL DSP", failedTracks.length ? "error" : runningTracks.length ? "running" : readyTracks.length && readyTracks.length === tracks.length ? "done" : tracks.length ? "waiting" : "idle",
       runningTracks.length ? `${runningTracks.length} analyzing · ${readyTracks.length}/${tracks.length} ready` : `${readyTracks.length}/${tracks.length} ready${cached ? ` · ${cached} cached` : ""}${available ? ` · ${available} existing metadata` : ""}`,
       `Beat grid, structure, bar features and cue candidates. ${cached} metadata results reused in the recorded build; ${available} already available without original run history; ${computed} pipeline results computed. See the track table for confirmed neural inference versus internal cache reuse.`,
-      tracks.map(t => ({track: t.title, status: t.analysisStatus, origin: t.analysisOrigin ?? "unknown", bpm: t.bpm}))),
+      tracks.map(t => ({track: t.title, status: t.analysisStatus, origin: t.analysisOrigin ?? "unknown", bpm: t.bpm, analysisSummary: t.analysisSummary}))),
     node("pairs", "Find transitions", "LOCAL PAIR ANALYZER", preparing ? "waiting" : blockedEdges.length ? "error" : edges.some(e => e.status === "analyzing") ? "running" : edges.length && readyEdges.length === edges.length ? "done" : tracks.length ? "waiting" : "idle",
       `${readyEdges.length}/${edges.length} pairs ready${blockedEdges.length ? ` · ${blockedEdges.length} blocked` : ""}`,
       "Tests adjacent entry/exit candidates, energy and bass overlap. Analyzed candidates are not yet executable Meta plans.", edges.map(e => ({source: e.sourceTrackId, target: e.targetTrackId, status: e.status, candidates: e.candidateCount, reason: e.reason}))),
@@ -69,6 +70,9 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
       telemetry?.activationInProgress ? "Loading & verifying set…" : b?.activation ? "Playlist exported" : b?.activationReady ? "Ready to export" : "Waiting for prepared set",
       "Writes the Mixxx playlist. Open it and select the first row, then Start set. Exporting does not play audio.", b?.activation ? {status: b.activation.status, queueRevision: b.activation.queueRevision, trackCount: b.activation.trackCount} : null),
   ];
+  // Analysis precedes curation; this branch deliberately ends at selected order.
+  [preparation[1], preparation[2]] = [preparation[2], preparation[1]];
+  if (b?.selectionOnly) preparation.splice(3);
   if (!live || !state.connected || disconnected) preparation.forEach(n => {n.status = "stale"; n.label = !live ? "No live preparation data" : "Last known · disconnected";});
   const p = state.plan;
   const planningCalls = p.metaCalls ?? [];

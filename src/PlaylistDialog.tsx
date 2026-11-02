@@ -68,7 +68,7 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Could not load playlist");
       setSent(null);
-      setNotice(`Loaded ${selected.trackCount} tracks into preparation. Checking adjacent transitions using existing analyses. Export and Start remain separate actions.`);
+      setNotice(`Loaded ${selected.trackCount} tracks and their saved order. This stage stops at selection; no transition or playback was started.`);
     } catch (error) {setError(error instanceof Error ? error.message : String(error));}
     finally {setBusy(false);}
   };
@@ -83,11 +83,14 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
     </div>
     {mode === "new" ? <>
       <div className="playlist-chat" role="log" aria-label="Playlist conversation" aria-live="polite">
-        <div className="playlist-message"><strong>Playlist assistant</strong><p>Tell me the style, number of tracks and energy arc you want. I’ll ask Meta to select from your local library, then prepare the audio analysis and transitions.</p></div>
+        <div className="playlist-message"><strong>Playlist assistant</strong><p>Tell me the playlist you want. I’ll first analyze every song in your local library, reusing existing results. Once all analyses succeed, Meta will select and order your tracks. This stage stops at the playlist.</p></div>
         {sent && <div className="playlist-message playlist-message--user"><strong>You · {sent.count} tracks</strong><p>{sent.prompt}</p></div>}
         {sent && <div className="playlist-message"><strong>{match && b?.model ? b.model : "Preparation status"}</strong>
-          <p>{error ? error : busy || !match || b?.status === "curating" ? "Requesting a playlist from Meta…"
-            : b?.error ? b.error : b?.status === "ready" ? `Your ${b.queue.length}-track playlist is prepared. Export it to Mixxx when you’re ready.`
+          <p>{error ? error : !match ? "Submitting your build request…"
+            : b?.error ? b.error : b?.buildPhase === "library_analysis" ? `Analyzing the library: ${b.library?.filter(t => t.analysisStatus === "ready").length ?? 0}/${b.catalogCount} ready. Meta has not selected songs yet.`
+            : b?.status === "curating" ? "Library analyzed. Meta is selecting and ordering songs…"
+            : b?.status === "selected" ? `Your ${b.queue.length}-track playlist is selected and ordered. Transition preparation is paused.`
+            : b?.status === "ready" ? `Your ${b.queue.length}-track playlist is prepared.`
             : b?.status === "planning" ? "Refining the order using measured audio features…"
             : `${b?.queue.length ?? 0} tracks selected. ${b?.queue.filter(t => t.analysisStatus === "ready").length ?? 0} analyses ready; preparing adjacent transitions.`}</p>
           {!busy && !error && match && b?.queue.length ? <ol>{b.queue.map(track => <li key={track.id}>{track.title}<span>{track.analysisStatus}</span></li>)}</ol> : null}
@@ -101,7 +104,7 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
           onChange={event => {setPrompt(event.target.value); const parsed = requestedTrackCount(event.target.value); if (parsed != null) setCount(parsed);}} />
         <div className="playlist-composer__actions"><label>Tracks<input type="number" min={2} max={Math.max(2, max)} value={count} disabled={locked} onChange={event => setCount(Number(event.target.value))} /></label>
           <button type="submit" className="button button--primary" disabled={locked || !validCount || !prompt.trim()}>{busy || preparing ? "Preparing…" : `Send · build ${count} tracks`}</button></div>
-        <small>{max < 2 ? "Add at least two songs to local-assets/samples/ and restart the bridge." : !validCount ? `Choose 2–${max} tracks.` : "The Tracks field is the count sent to Meta. Sending uses API credits and starts preparation."}</small>
+        <small>{max < 2 ? "Add at least two songs to local-assets/samples/ and restart the bridge." : !validCount ? `Choose 2–${max} tracks.` : `Sending analyzes all ${b?.catalogCount ?? 0} library tracks before asking Meta to choose ${count}. Model calls use API credits.`}</small>
       </form>
     </> : <div className="playlist-saved">
       <div className="playlist-saved__heading"><p>Completed playlists saved in this project.</p><button type="button" className="button button--ghost" disabled={loading} onClick={() => setReload(v => v + 1)}>Refresh</button></div>
@@ -115,6 +118,6 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
     {error && <p className="playlist-dialog__error" role="alert">{error}</p>}
     {notice && <p className="playlist-dialog__notice" role="status">{notice}</p>}
     {disabled && <p className="playlist-dialog__library">Preparation controls are temporarily unavailable. Wait for the active action or reconnect to the live bridge.</p>}
-    <div className="playlist-dialog__footer"><span>Build and load prepare a set. Playback starts separately.</span><button type="button" className="button button--ghost" onClick={onClose}>Back to pipeline</button></div>
+    <div className="playlist-dialog__footer"><span>Current scope: library analysis → song selection and order.</span><button type="button" className="button button--ghost" onClick={onClose}>Back to pipeline</button></div>
   </dialog>;
 }

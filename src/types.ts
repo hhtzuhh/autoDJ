@@ -37,6 +37,7 @@ export interface QueueItem extends Track {
 }
 
 export interface PreparedTrack {
+  analysisSummary?: Record<string, unknown> | null;
   analysisOrigin?: "cache" | "computed" | "available" | "pending" | "unknown";
   analysisRun?: {
     jobId: string;
@@ -189,9 +190,12 @@ export interface CopilotState {
   events: PerformanceEvent[];
   flowTelemetry?: LiveFlowTelemetry;
   setBuilder?: {
+    selectionOnly?: boolean;
+    buildPhase?: "analysis_only" | "library_ready" | "library_analysis" | "curation" | "selection_complete" | "transitions";
+    library?: PreparedTrack[];
     buildId?: string;
     curatorCalls?: CuratorCall[];
-    status: "idle" | "curating" | "analyzing" | "planning" | "ready" | "blocked" | "error";
+    status: "idle" | "curating" | "analyzing" | "planning" | "ready" | "selected" | "blocked" | "error";
     prompt: string;
     model: string | null;
     reason: string | null;

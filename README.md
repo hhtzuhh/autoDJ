@@ -11,6 +11,22 @@ separately validated local prototype.
 
 ## Current status
 
+On `feat/analyze-library-before-curation`, the current preparation scope ends at
+**analyzed library → Meta song selection and order**. Build first rescans
+`local-assets/samples/` and analyzes every missing library track, including songs
+that will not be selected. Any failed analysis blocks curation. Only after all
+tracks are ready does Meta receive measured BPM, weak section labels, and DSP
+summaries. Cached results are reused. Genre still comes from file tags; normalized
+energy describes change within each track, not a calibrated cross-song ranking.
+New semantic music indicators are not implemented by this ordering change.
+
+The resulting status is `selected`, with no pair jobs, post-curation transition
+calls, export readiness or automatic playback. Saved selections can be loaded
+without invoking Meta. The existing transition implementation remains below as
+previously built behavior; it is not automatically entered by this branch's Build.
+Its optional `prepare_transitions=True` service path is retained for regression
+coverage and future integration, not enabled by the product bridge.
+
 - Implemented here: responsive React/TypeScript control-room UI, typed state
   contract, queue/Deck/plan/event views, deterministic adjacent-pair analysis,
   and bounded Meta selection for the current A–B–C window.
@@ -128,6 +144,16 @@ Validate → Execute → Verify loop, and optional webcam feedback into future
 plans. Select a node to inspect its reported evidence. The request ledger
 shows retained model-call status, latency and token usage where available.
 
+The preparation nodes run **Local library → Analyze library → Select & order**.
+Click **Local library** to open all scanned songs with artist, file-tag genre,
+and duration. Click **Analyze library** to inspect Ready / Not ready / Analyzing /
+Failed counts and individual results. Check individual songs or **Select all songs**,
+then use **Analyze selected (N)**. Nothing is selected by default; an empty selection
+disables the button. The analyzer reuses ready results and runs only missing or failed
+analyses in the selected subset. This standalone action (`POST /api/set-builder/analyze`
+with an explicit `trackIds` array) stops before Meta selection and preserves
+an existing selected order. **Modal accelerate** is visible but disabled.
+Building a playlist still analyzes any remaining library songs before Meta selection.
 Click the **Select & order** node to open the playlist dialog. **Build a new
 playlist** accepts a natural-language request; explicit song counts populate
 the visible Tracks field, which is authoritative when sent. The conversation
@@ -135,8 +161,8 @@ shows the submitted request and actual preparation status. Sending invokes the
 same Meta set builder as Control room; opening the dialog makes no model call.
 **Use a saved playlist** lists completed builds from this project's ignored
 `artifacts/live-performance/saved-sets/`. Loading checks local songs and analysis
-identity, reuses analyses, and checks adjacent pairs. It changes preparation only;
-Export and Start are separate actions. Original API-call records remain historical.
+identity and reuses analyses. It restores selection only; transition preparation
+is paused in this branch. Original API-call records remain historical.
 
 Lights reflect reported state: cyan is working, green is complete/available,
 amber is waiting, red is failed/blocked, and gray is idle or unavailable.
@@ -146,7 +172,7 @@ requires fresh bridge telemetry and an owned, running executor. The handoff
 counter resets on bridge restart and excludes restored plans. Disconnection
 removes live execution claims; simulation is explicitly labeled.
 
-Select **Analyze audio** to see every selected track, its analysis source,
+Select **Analyze library** to see every library track, its analysis source,
 status, and recorded job ID/runner/duration. Complete metadata reuse, reuse of
 All-In-One's internal neural-output cache with DSP recomputation, and fresh
 neural inference are separate cases. A custom/injected analyzer is not labeled
@@ -201,12 +227,11 @@ http://127.0.0.1:5173/?source=live
 
 The Queue panel now also exposes the development set builder. Its catalog is
 bounded to `local-assets/samples` by default; audio paths and source files are
-never returned to the browser. **Build with Meta** makes one strict curation
-call for membership and order, then reports track and edge analysis status as
-the local worker progresses. Once every edge is ready, select **Export Mixxx
-playlist**, open the generated playlist, and select its first row. **Start set**
-verifies the first two rows before changing the active queue or playing Deck
-1. It plans but does not arm the first transition.
+never returned to the browser. **Build with Meta** first completes missing
+analyses across the library, then makes a strict curation call for membership and
+order. Progress includes all tracks, not just the selected subset. This branch
+stops with **Playlist selected · transitions paused**. Export and Start stay
+disabled for this selection; the active Mixxx queue is untouched.
 
 Observed Deck state is never overwritten directly. The Arm action never sends
 MIDI directly: it first creates a unique plan instance and delegates identity,

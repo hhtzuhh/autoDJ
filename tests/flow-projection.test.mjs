@@ -15,6 +15,16 @@ function fixture() {
       transitions: [{status:'analyzed', candidateCount:5, reason:null}], curatorCalls: []}};
 }
 const find = (flow, lane, id) => flow[lane].find(n => n.id === id);
+test('library analysis precedes Meta selection and selection-only flow ends there', () => {
+  const s=fixture();s.setBuilder.selectionOnly=true;s.setBuilder.buildPhase='library_analysis';
+  s.setBuilder.library=s.setBuilder.queue;s.setBuilder.queue=[];
+  s.setBuilder.library[1].analysisStatus='analyzing';
+  const flow=deriveAgentFlow(s,null,false,now);
+  assert.deepEqual(flow.preparation.map(n=>n.id),['library','analysis','curation']);
+  assert.equal(find(flow,'preparation','analysis').status,'running');
+  assert.equal(find(flow,'preparation','curation').status,'waiting');
+  assert.match(find(flow,'preparation','analysis').label,/1\/2 ready/);
+});
 test('track rows distinguish complete metadata reuse, neural cache and confirmed fresh inference', () => {
   const tracks = [
     {id:'cache',analysisStatus:'ready',analysisOrigin:'cache'},

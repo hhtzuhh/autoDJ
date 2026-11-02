@@ -78,7 +78,7 @@ class SetBuilderTest(unittest.TestCase):
 
             service = SetBuilderService(
                 root,
-                metadata_reader=metadata,
+                metadata_reader=metadata, prepare_transitions=True,
                 curator=curator,
                 start_worker=False,
             )
@@ -98,7 +98,7 @@ class SetBuilderTest(unittest.TestCase):
             track_ids = write_analyzed_library(root)
             service = SetBuilderService(
                 root,
-                metadata_reader=metadata,
+                metadata_reader=metadata, prepare_transitions=True,
                 curator=lambda tracks, prompt, count: (track_ids, "fixture"),
                 start_worker=False,
             )
@@ -138,7 +138,7 @@ class SetBuilderTest(unittest.TestCase):
             improved = (track_ids[0], track_ids[2], track_ids[4], track_ids[1], track_ids[3])
             service = SetBuilderService(
                 root,
-                metadata_reader=metadata,
+                metadata_reader=metadata, prepare_transitions=True,
                 curator=lambda tracks, prompt, count: (track_ids, "initial"),
                 post_curator=lambda tracks, prompt, count: (improved, "measured BPM reorder"),
                 start_worker=False,
@@ -201,7 +201,7 @@ class SetBuilderTest(unittest.TestCase):
 
             service = SetBuilderService(
                 root,
-                metadata_reader=metadata,
+                metadata_reader=metadata, prepare_transitions=True,
                 curator=original_order,
                 post_curator=original_order,
                 analyzer=fake_analyzer,

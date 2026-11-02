@@ -17,7 +17,7 @@ class CuratorBudgetTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.ids = write_analyzed_library(self.root, count=3)
-        self.service = SetBuilderService(self.root, metadata_reader=metadata, start_worker=False)
+        self.service = SetBuilderService(self.root, metadata_reader=metadata, prepare_transitions=True, start_worker=False)
         self.tracks = tuple(self.service.catalog.values())
         self.response = json.dumps({'ordered_track_ids': list(self.ids), 'reason': 'Measured continuity.'})
         for patcher in [patch.dict(os.environ, {'META_CURATOR_MAX_TOKENS': '4096', 'META_CURATOR_TIMEOUT_SECONDS': '60'}),

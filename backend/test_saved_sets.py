@@ -10,7 +10,7 @@ from test_set_builder import metadata, write_analyzed_library
 class SavedSetsTest(unittest.TestCase):
     def service(self, root):
         ids=write_analyzed_library(root,count=3)
-        s=SetBuilderService(root,metadata_reader=metadata,start_worker=False,
+        s=SetBuilderService(root,metadata_reader=metadata, prepare_transitions=True,start_worker=False,
                             curator=lambda *args:(ids,'Synthetic selection'),
                             pair_builder=lambda *args:(5,None))
         s.build('Three synthetic house tracks',3)

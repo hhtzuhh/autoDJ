@@ -311,6 +311,19 @@ class LiveStateStore(CrowdAdaptiveMixin):
         except Exception as error:
             return 502, {"error": str(error)}
 
+    def request_library_analysis(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            try:
+                if not isinstance(payload.get("trackIds"), list):
+                    raise ValueError("trackIds must be an explicit list of selected songs")
+                return 202, self.set_builder.analyze_library(payload["trackIds"])
+            except ValueError as error:
+                return 409, {"error": str(error)}
+            except Exception as error:
+                return 502, {"error": str(error)}
+
     def request_set_retry(self) -> tuple[int, dict[str, Any]]:
         try:
             return 202, self.set_builder.retry_post_plan()
@@ -3136,6 +3149,10 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/set-builder/build":
                 status, response = store.request_set_build(payload)
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/analyze":
+                status, response = store.request_library_analysis(payload)
                 self._json(status, response)
                 return
             if self.path == "/api/set-builder/load":

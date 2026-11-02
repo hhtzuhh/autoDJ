@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -34,7 +35,30 @@ ordered_track_ids and reason. ordered_track_ids must contain unique IDs.
 Use track_count as the exact requested count; request prose may contain an old
 count. Keep reason to one concise sentence, at most 500 characters. Prefer a
 simple feasible ordering; do not enumerate permutations or write an essay.
+Every catalog track has been analyzed before this request. Use analysisSummary
+for measured evidence. Genre comes from file tags, not audio classification.
+Relative energy is normalized within each song, not comparable perceived energy
+between songs. Groove, mood, key and vocal identity are unknown unless supplied.
 """.strip()
+
+
+def analysis_summary(analysis: dict[str, Any]) -> dict[str, Any]:
+    bars = analysis.get("bars", [])
+    def average(rows, key):
+        values = [float(row[key]) for row in rows if isinstance(row.get(key), (int, float)) and math.isfinite(row[key])]
+        return round(sum(values) / len(values), 4) if values else None
+    return {
+        "analysisKey": analysis.get("analysis_cache_key"),
+        "measuredBpm": analysis.get("rhythm", {}).get("bpm"),
+        "durationSeconds": analysis.get("duration_seconds"),
+        "barCount": len(bars),
+        "sections": analysis.get("structure", {}).get("segments", [])[:24],
+        "relativeEnergyByThird": [average(bars[len(bars)*i//3:len(bars)*(i+1)//3], "rms_normalized") for i in range(3)],
+        "meanLowFrequencyRatio": average(bars, "low_ratio"),
+        "energyBasis": "within_track_normalized_rms_not_cross_track_perceived_energy",
+        "sectionLabels": "weak_model_predictions",
+        "genreSource": "file_tags_only",
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -86,6 +110,7 @@ class CatalogTrack:
     duration_seconds: float
     bpm: float
     analysis_status: str
+    analysis_summary: dict[str, Any] | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -96,6 +121,7 @@ class CatalogTrack:
             "durationSeconds": self.duration_seconds,
             "bpm": self.bpm,
             "analysisStatus": self.analysis_status,
+            "analysisSummary": self.analysis_summary,
         }
 
 
@@ -107,8 +133,13 @@ def scan_catalog(
 ) -> dict[str, CatalogTrack]:
     analyses: dict[str, dict[str, Any]] = {}
     for analysis_path in analysis_root.glob("*/track-analysis-v1.json"):
-        payload = json.loads(analysis_path.read_text(encoding="utf-8"))
-        analyses[str(payload["audio_sha256"])] = payload
+        try:
+            payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+            bpm = float(payload.get("rhythm", {}).get("bpm", 0))
+            if payload.get("analysis_cache_key") and math.isfinite(bpm) and bpm > 0:
+                analyses[str(payload["audio_sha256"])] = payload
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
     tracks: dict[str, CatalogTrack] = {}
     if not library_root.exists():
         return tracks
@@ -127,6 +158,7 @@ def scan_catalog(
             duration_seconds=float(analysis.get("duration_seconds", metadata["durationSeconds"])),
             bpm=float(analysis.get("rhythm", {}).get("bpm", 0)),
             analysis_status="ready" if analysis else "pending",
+            analysis_summary=analysis_summary(analysis) if analysis else None,
         )
     return tracks
 
@@ -204,6 +236,7 @@ class SetBuilderService:
         analyzer: Callable[[CatalogTrack], dict[str, Any] | None] | None = None,
         pair_builder: Callable[[str, str], int | tuple[int, str | None]] | None = None,
         start_worker: bool = True,
+        prepare_transitions: bool = False,
     ) -> None:
         self.workspace = workspace.resolve()
         self.data_root = (data_root or workspace).resolve()
@@ -216,6 +249,7 @@ class SetBuilderService:
         self.jobs: queue.Queue[tuple[str, ...]] = queue.Queue()
         self.queued_jobs: set[tuple[str, ...]] = set()
         self.metadata_reader = metadata_reader
+        self.prepare_transitions = prepare_transitions
         self.catalog = scan_catalog(
             self.library_root,
             self.analysis_root,
@@ -227,6 +261,13 @@ class SetBuilderService:
         self.analysis_engine = "custom" if analyzer else "all_in_one_plus_dsp"
         self.pair_builder = pair_builder or self._build_pair
         self.state = self._initial_state()
+        if self.state.get("buildPhase") == "analysis_only":
+            # An interrupted standalone analysis is resumable by Analyze, never
+            # by an implicit model call on bridge startup.
+            self.state["buildPhase"] = "library_ready"
+        self.state["selectionOnly"] = not prepare_transitions
+        if not prepare_transitions:
+            self.state["transitions"] = []
         if self.state["orderedTrackIds"]:
             self._schedule_current()
             self._recompute_status()
@@ -386,7 +427,7 @@ class SetBuilderService:
             encoding="utf-8",
         )
         temporary.replace(self.state_path)
-        if self.state.get("status") == "ready" and self.state.get("activationReady") and not self.state.get("loadedFromSavedSet"):
+        if (self.state.get("status") == "selected" or self.state.get("status") == "ready" and self.state.get("activationReady")) and not self.state.get("loadedFromSavedSet"):
             build_id = self.state.get("buildId")
             if build_id and re.fullmatch(r"build-\d+", build_id):
                 self.saved_root.mkdir(parents=True, exist_ok=True)
@@ -436,10 +477,13 @@ class SetBuilderService:
                 raise ValueError("Analysis changed since this playlist was saved; build a new playlist")
             self.catalog = catalog
             self.state = {**saved, "queueRevision": int(self.state["queueRevision"]) + 1,
+                          "selectionOnly": not self.prepare_transitions,
+                          "buildPhase": "transitions" if self.prepare_transitions else "selection_complete",
                           "loadedFromSavedSet": saved_id, "analysisOrigins": {t: "cache" for t in ids},
                           "analysisRuns": {}, "trackStatuses": {t: track.analysis_status for t, track in catalog.items()},
                           "transitions": [], "error": None}
-            self._refresh_edges()
+            if self.prepare_transitions:
+                self._refresh_edges()
             self._schedule_current()
             self._recompute_status()
             self._persist()
@@ -483,6 +527,8 @@ class SetBuilderService:
             self.jobs.put(job)
 
     def _schedule_current(self) -> None:
+        if self.state.get("buildPhase") in {"library_analysis", "curation", "analysis_only", "library_ready"} or self.state.get("selectionOnly"):
+            return
         ordered = [str(value) for value in self.state["orderedTrackIds"]]
         for track_id in ordered:
             if self.state["trackStatuses"].get(track_id) != "ready":
@@ -524,6 +570,15 @@ class SetBuilderService:
         )
 
     def _recompute_status(self) -> None:
+        if self.state.get("buildPhase") in {"library_analysis", "curation", "analysis_only", "library_ready"} or self.state.get("selectionOnly"):
+            self.state["preparationReady"] = False
+            self.state["activationReady"] = False
+            self.state["status"] = "error" if self.state.get("error") else (
+                "analyzing" if self.state.get("buildPhase") in {"library_analysis", "analysis_only"} else
+                "curating" if self.state.get("buildPhase") == "curation" else
+                "selected" if self.state["orderedTrackIds"] else "idle")
+            self.state["updatedAt"] = utc_now()
+            return
         ordered = self.state["orderedTrackIds"]
         tracks_ready = bool(ordered) and all(
             self.state["trackStatuses"].get(track_id) == "ready" for track_id in ordered
@@ -560,40 +615,116 @@ class SetBuilderService:
             self.state["status"] = "idle"
         self.state["updatedAt"] = utc_now()
 
+    def analyze_library(self, track_ids: list[str] | None = None) -> dict[str, Any]:
+        """Analyze the requested subset (or the library for internal callers)."""
+        with self.lock:
+            if self.queued_jobs or self.state.get("status") in {"curating", "analyzing", "planning"}:
+                raise ValueError("Wait for the current build or analysis to finish")
+            catalog = scan_catalog(self.library_root, self.analysis_root, metadata_reader=self.metadata_reader)
+            if not catalog:
+                raise ValueError("No songs found in local-assets/samples/")
+            ids = list(catalog) if track_ids is None else track_ids
+            if not isinstance(ids, list) or not ids or any(not isinstance(t, str) for t in ids):
+                raise ValueError("Select at least one song using trackIds")
+            if len(set(ids)) != len(ids) or any(t not in catalog for t in ids):
+                raise ValueError("trackIds must contain unique songs from the current library")
+            if any(t not in catalog for t in self.state["orderedTrackIds"]):
+                raise ValueError("A selected song is missing; build a new playlist for the changed library")
+            self.catalog = catalog
+            self.state.update(buildPhase="analysis_only", analysisTrackIds=list(ids), error=None)
+            # Retain the last run evidence for songs outside this request.
+            self.state["trackStatuses"] = {
+                t: row.analysis_status if t in ids or row.analysis_status == "ready"
+                else self.state["trackStatuses"].get(t, row.analysis_status)
+                for t, row in catalog.items()}
+            self.state["analysisOrigins"] = {
+                t: ("cache" if row.analysis_status == "ready" else "pending") if t in ids
+                else self.state.get("analysisOrigins", {}).get(t, "available" if row.analysis_status == "ready" else "pending")
+                for t, row in catalog.items()}
+            self.state["analysisRuns"] = {t: run for t, run in self.state.get("analysisRuns", {}).items() if t in catalog and t not in ids}
+            self._recompute_status()
+            self._persist()
+            pending = [t for t in ids if catalog[t].analysis_status != "ready"]
+            if pending:
+                for track_id in pending:
+                    self._enqueue(("track", track_id))
+                self._enqueue(("analysis_done",))
+            else:
+                self._finish_library_analysis()
+            return self.snapshot()
+
+    def _finish_library_analysis(self) -> None:
+        with self.lock:
+            self.state["buildPhase"] = "library_ready"
+            self._recompute_status()
+            self._persist()
+
     def build(self, prompt: str, count: int) -> dict[str, Any]:
         prompt = prompt.strip()
         if not prompt:
             raise ValueError("set request is empty")
         if count < 2 or count > 50:
             raise ValueError("track count must be between 2 and 50")
-        candidates = tuple(self.catalog.values())
-        if count > len(candidates):
-            raise ValueError(f"catalog contains only {len(candidates)} tracks")
         with self.lock:
+            if self.queued_jobs or self.state.get("status") in {"curating", "analyzing", "planning"}:
+                raise ValueError("Wait for the current build to finish")
+            # Rescan only this configured library; never restore the outer cache.
+            self.catalog = scan_catalog(self.library_root, self.analysis_root, metadata_reader=self.metadata_reader)
+            if count > len(self.catalog):
+                raise ValueError(f"catalog contains only {len(self.catalog)} tracks")
             self.state["buildId"] = f"build-{time.time_ns()}"
             self.state.pop("loadedFromSavedSet", None)
-            self.state["status"] = "curating"
+            self.state.update(buildPhase="library_analysis", requestedCount=count,
+                              analysisTrackIds=list(self.catalog), orderedTrackIds=[], transitions=[],
+                              reason=None, model=None, postAnalysisPlanning="idle")
+            self.state["trackStatuses"] = {t: row.analysis_status for t, row in self.catalog.items()}
+            self.state["analysisOrigins"] = {t: "cache" if row.analysis_status == "ready" else "pending" for t, row in self.catalog.items()}
+            self.state["analysisRuns"] = {}
             self.state["error"] = None
             self.state["prompt"] = prompt
-            self.state["updatedAt"] = utc_now()
+            self._recompute_status()
+            self._persist()
+            pending = [t for t, row in self.catalog.items() if row.analysis_status != "ready"]
+            if pending:
+                for track_id in pending:
+                    self._enqueue(("track", track_id))
+                self._enqueue(("curate", self.state["buildId"]))
+                return self.snapshot()
+        return self._curate_analyzed_catalog(self.state["buildId"])
+
+    def _curate_analyzed_catalog(self, build_id: str) -> dict[str, Any]:
+        with self.lock:
+            if self.state.get("buildId") != build_id:
+                return self.snapshot()
+            ids = self.state["analysisTrackIds"]
+            if self.state.get("error") or any(self.state["trackStatuses"].get(t) != "ready" for t in ids):
+                self.state["error"] = self.state.get("error") or "Library analysis is incomplete; Meta selection was not called"
+                self._recompute_status(); self._persist()
+                return self.snapshot()
+            candidates = tuple(self.catalog[t] for t in ids)
+            prompt, count = self.state["prompt"], self.state["requestedCount"]
+            self.state["buildPhase"] = "curation"
+            self._recompute_status(); self._persist()
         try:
             ordered, reason = self.curator(candidates, prompt, count)
+            if len(ordered) != count or len(set(ordered)) != count or any(t not in ids for t in ordered):
+                raise ValueError("Curator returned invalid track selection")
         except Exception as error:
             with self.lock:
                 self.state["status"] = "error"
                 self.state["error"] = str(error)
                 self._persist()
-            raise
+            return self.snapshot()
         with self.lock:
             self.state["queueRevision"] = int(self.state["queueRevision"]) + 1
             self.state["orderedTrackIds"] = list(ordered)
-            self.state["analysisOrigins"] = {t: "cache" if self.catalog[t].analysis_status == "ready" else "pending" for t in ordered}
-            self.state["analysisRuns"] = {}
             self.state["reason"] = reason
             self.state["error"] = None
             self.state["transitions"] = []
             self.state["postAnalysisPlanning"] = "pending"
-            self._refresh_edges()
+            self.state["buildPhase"] = "transitions" if self.prepare_transitions else "selection_complete"
+            if self.prepare_transitions:
+                self._refresh_edges()
             self._schedule_current()
             self._recompute_status()
             self._persist()
@@ -650,6 +781,9 @@ class SetBuilderService:
             return {
                 **json.loads(json.dumps(self.state)),
                 "catalogCount": len(self.catalog),
+                "library": [{**row.public(), "analysisStatus": self.state["trackStatuses"].get(t, row.analysis_status),
+                             "analysisOrigin": self.state.get("analysisOrigins", {}).get(t, "unknown"),
+                             "analysisRun": json.loads(json.dumps(self.state.get("analysisRuns", {}).get(t)))} for t, row in self.catalog.items()],
                 "queue": [
                     {
                         **self.catalog[track_id].public(),
@@ -671,6 +805,10 @@ class SetBuilderService:
                     self._work_pair(job[1], job[2])
                 elif job[0] == "post_plan":
                     self._work_post_plan()
+                elif job[0] == "curate":
+                    self._curate_analyzed_catalog(job[1])
+                elif job[0] == "analysis_done":
+                    self._finish_library_analysis()
             finally:
                 with self.lock:
                     self.queued_jobs.discard(job)
@@ -678,7 +816,7 @@ class SetBuilderService:
 
     def _work_track(self, track_id: str) -> None:
         with self.lock:
-            if track_id not in self.state["orderedTrackIds"]:
+            if track_id not in self.state.get("analysisTrackIds", self.state["orderedTrackIds"]):
                 return
             self.state["trackStatuses"][track_id] = "analyzing"
             run = {"jobId": f"analysis-{time.time_ns()}", "buildId": self.state.get("buildId"),
@@ -697,13 +835,16 @@ class SetBuilderService:
                     run["neuralNet"] = result["neuralNet"]
                 original = self.catalog[track_id]
                 analysis_path = self.analysis_root / track_id / "track-analysis-v1.json"
-                analysis = json.loads(analysis_path.read_text(encoding="utf-8")) if analysis_path.exists() else {}
+                analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+                if analysis.get("audio_sha256") != track_id or not analysis.get("analysis_cache_key") or float(analysis.get("rhythm", {}).get("bpm", 0)) <= 0:
+                    raise ValueError("Analyzer output lacks matching identity, cache key or measured BPM")
                 self.catalog[track_id] = CatalogTrack(
                     **{
                         **original.__dict__,
                         "duration_seconds": float(analysis.get("duration_seconds", original.duration_seconds)),
                         "bpm": float(analysis.get("rhythm", {}).get("bpm", original.bpm)),
                         "analysis_status": "ready",
+                        "analysis_summary": analysis_summary(analysis),
                     }
                 )
                 self.state["trackStatuses"][track_id] = "ready"

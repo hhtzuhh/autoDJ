@@ -508,7 +508,7 @@ function QueuePanel({
           </div>
           <div className="set-builder__status">
             <span className={`builder-state builder-state--${builder?.status ?? "idle"}`}>
-              {builder?.status === "ready" ? "Set prepared" : builder?.status ?? "idle"}
+              {builder?.status === "selected" ? "Playlist selected · transitions paused" : builder?.status === "ready" ? "Set prepared" : builder?.status ?? "idle"}
             </span>
             <span>{builder?.catalogCount ?? 0} local tracks</span>
             {builder?.model && <span>{builder.model}</span>}
@@ -964,7 +964,7 @@ function App() {
 
   const buildSet = async (prompt: string, count: number): Promise<BuildResult> => {
     setActionPending(true);
-    setActionNotice("Meta is curating the bounded local catalog…");
+    setActionNotice("Analyzing the local library before Meta selects songs…");
     try {
       const response = await fetch("http://127.0.0.1:8765/api/set-builder/build", {
         method: "POST",
@@ -972,8 +972,8 @@ function App() {
         body: JSON.stringify({ prompt, count }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? `Bridge returned ${response.status}`);
-      setActionNotice("Queue accepted. Track and adjacent-pair analysis is running in the background.");
+      if (!response.ok || payload.status === "error") throw new Error(payload.error ?? `Bridge returned ${response.status}`);
+      setActionNotice("Build accepted. Library analysis must complete before Meta selects and orders the playlist.");
       return {ok: true, buildId: payload.buildId};
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -982,6 +982,23 @@ function App() {
     } finally {
       setActionPending(false);
     }
+  };
+
+  const analyzeLibrary = async (trackIds: string[]): Promise<BuildResult> => {
+    setActionPending(true);
+    try {
+      const response = await fetch("http://127.0.0.1:8765/api/set-builder/analyze", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({trackIds}),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload.status === "error") throw new Error(payload.error ?? "Could not start library analysis");
+      setActionNotice("Selected-song analysis accepted. Meta selection waits for a playlist request.");
+      return {ok: true};
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setActionNotice(`Rejected: ${message}`);
+      return {ok: false, error: message};
+    } finally { setActionPending(false); }
   };
 
   const retrySetPlanning = async () => {
@@ -1078,7 +1095,7 @@ function App() {
           <button id="flow-tab" role="tab" aria-controls="flow-view" aria-selected={view === "flow"} tabIndex={view === "flow" ? 0 : -1} onClick={() => switchView("flow")}>Agent flow</button>
         </nav>
         <div id="flow-view" role="tabpanel" aria-labelledby="flow-tab" hidden={view !== "flow"}>
-          <AgentFlow state={state} webcam={webcamTelemetry} disconnected={Boolean(bridgeError) || (liveRequested && state.dataSource !== "live")} active={view === "flow"} disabled={actionPending || state.plan.status === "executing"} onBuild={buildSet} />
+          <AgentFlow state={state} webcam={webcamTelemetry} disconnected={Boolean(bridgeError) || (liveRequested && state.dataSource !== "live")} active={view === "flow"} disabled={actionPending || state.plan.status === "executing"} onBuild={buildSet} onAnalyze={analyzeLibrary} />
         </div>
         <div id="control-view" role="tabpanel" aria-labelledby="control-tab" hidden={view !== "control"}>
         <section className="hero-strip">
