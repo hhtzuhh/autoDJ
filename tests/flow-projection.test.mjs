@@ -20,7 +20,7 @@ test('library analysis precedes Meta selection and selection-only flow ends ther
   s.setBuilder.library=s.setBuilder.queue;s.setBuilder.queue=[];
   s.setBuilder.library[1].analysisStatus='analyzing';
   const flow=deriveAgentFlow(s,null,false,now);
-  assert.deepEqual(flow.preparation.map(n=>n.id),['library','analysis','curation']);
+  assert.deepEqual(flow.preparation.map(n=>n.id),['library','analysis','music','curation']);
   assert.equal(find(flow,'preparation','analysis').status,'running');
   assert.equal(find(flow,'preparation','curation').status,'waiting');
   assert.match(find(flow,'preparation','analysis').label,/1\/2 ready/);
@@ -100,4 +100,22 @@ test('projection preserves source state and shows only real recorded model calls
   const original=JSON.stringify(s);const flow=deriveAgentFlow(s,null,false,now);
   assert.equal(flow.records.length,1);assert.equal(flow.records[0].id,'real-record');
   assert.equal(flow.inFlight,0);assert.equal(JSON.stringify(s),original);
+});
+
+test('music feature node tracks actual requests separately from queued songs and local analysis', () => {
+  const s=fixture();s.setBuilder.selectionOnly=true;s.setBuilder.library=s.setBuilder.queue;
+  s.setBuilder.library[0].musicFeatures={status:'running',model:'muse-spark-1.2',jobId:'music-1',requestStartedAt:new Date(now-1000).toISOString()};
+  s.setBuilder.library[1].musicFeatures={status:'queued'};
+  let flow=deriveAgentFlow(s,null,false,now);
+  assert.equal(find(flow,'preparation','music').status,'running');
+  assert.equal(find(flow,'preparation','analysis').status,'done');
+  assert.equal(flow.inFlight,1);
+  assert.equal(flow.records.filter(r=>r.scope==='Music feature extraction').length,1);
+  s.setBuilder.library[0].musicFeatures={status:'ready',origin:'cache',jobId:'music-1',requestStartedAt:new Date(now-1000).toISOString(),elapsedSeconds:1,content:'Synthetic'};
+  s.setBuilder.library[1].musicFeatures={status:'failed',error:'Synthetic failure'};
+  flow=deriveAgentFlow(s,null,false,now);
+  assert.equal(find(flow,'preparation','music').status,'error');
+  assert.equal(flow.inFlight,0);
+  assert.match(flow.records[0].detail,/cached/);
+  assert.equal(find(deriveAgentFlow(s,null,true,now),'preparation','music').status,'stale');
 });

@@ -330,6 +330,17 @@ class LiveStateStore(CrowdAdaptiveMixin):
         except ValueError as error:
             return 409, {"error": str(error)}
 
+    def request_music_features(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            try:
+                return 202, self.set_builder.describe_music(payload.get("trackIds"))
+            except ValueError as error:
+                return 409, {"error": str(error)}
+            except Exception:
+                return 502, {"error": "Could not start music feature analysis"}
+
     def request_load_saved_set(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
             if self._executor_running() or self.activation_in_progress:
@@ -3066,6 +3077,15 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
             return payload
 
         def do_GET(self) -> None:  # noqa: N802
+            if self.path.startswith("/api/set-builder/music-features/"):
+                track_id = self.path.removeprefix("/api/set-builder/music-features/")
+                try:
+                    if track_id not in store.set_builder.catalog:
+                        raise ValueError("Song is not in the library")
+                    self._json(200, store.set_builder.music_extractor.raw_response(track_id))
+                except (ValueError, OSError):
+                    self._json(404, {"error": "Raw response unavailable"})
+                return
             if self.path == "/api/set-builder/saved":
                 self._json(200, {"playlists": store.set_builder.saved_sets()})
                 return
@@ -3153,6 +3173,10 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/set-builder/analyze":
                 status, response = store.request_library_analysis(payload)
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/music-features":
+                status, response = store.request_music_features(payload)
                 self._json(status, response)
                 return
             if self.path == "/api/set-builder/load":

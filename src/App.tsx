@@ -1001,6 +1001,20 @@ function App() {
     } finally { setActionPending(false); }
   };
 
+  const describeMusic = async (trackIds: string[]): Promise<BuildResult> => {
+    setActionPending(true);
+    try {
+      const response = await fetch("http://127.0.0.1:8765/api/set-builder/music-features", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({trackIds}),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload.status === "error") throw new Error(payload.error ?? "Could not start Muse music analysis");
+      return {ok: true};
+    } catch (error) {
+      return {ok: false, error: error instanceof Error ? error.message : String(error)};
+    } finally {setActionPending(false);}
+  };
+
   const retrySetPlanning = async () => {
     setActionPending(true);
     try {
@@ -1095,7 +1109,7 @@ function App() {
           <button id="flow-tab" role="tab" aria-controls="flow-view" aria-selected={view === "flow"} tabIndex={view === "flow" ? 0 : -1} onClick={() => switchView("flow")}>Agent flow</button>
         </nav>
         <div id="flow-view" role="tabpanel" aria-labelledby="flow-tab" hidden={view !== "flow"}>
-          <AgentFlow state={state} webcam={webcamTelemetry} disconnected={Boolean(bridgeError) || (liveRequested && state.dataSource !== "live")} active={view === "flow"} disabled={actionPending || state.plan.status === "executing"} onBuild={buildSet} onAnalyze={analyzeLibrary} />
+          <AgentFlow state={state} webcam={webcamTelemetry} disconnected={Boolean(bridgeError) || (liveRequested && state.dataSource !== "live")} active={view === "flow"} disabled={actionPending || state.plan.status === "executing"} onBuild={buildSet} onAnalyze={analyzeLibrary} onDescribeMusic={describeMusic} />
         </div>
         <div id="control-view" role="tabpanel" aria-labelledby="control-tab" hidden={view !== "control"}>
         <section className="hero-strip">

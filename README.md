@@ -18,7 +18,7 @@ that will not be selected. Any failed analysis blocks curation. Only after all
 tracks are ready does Meta receive measured BPM, weak section labels, and DSP
 summaries. Cached results are reused. Genre still comes from file tags; normalized
 energy describes change within each track, not a calibrated cross-song ranking.
-New semantic music indicators are not implemented by this ordering change.
+The separate Muse Spark music-features node now adds optional, unverified audio descriptions; see Agent flow below.
 
 The resulting status is `selected`, with no pair jobs, post-curation transition
 calls, export readiness or automatic playback. Saved selections can be loaded
@@ -144,7 +144,7 @@ Validate → Execute → Verify loop, and optional webcam feedback into future
 plans. Select a node to inspect its reported evidence. The request ledger
 shows retained model-call status, latency and token usage where available.
 
-The preparation nodes run **Local library → Analyze library → Select & order**.
+The preparation nodes run **Local library → Analyze library → Muse Spark music features → Select & order**.
 Click **Local library** to open all scanned songs with artist, file-tag genre,
 and duration. Click **Analyze library** to inspect Ready / Not ready / Analyzing /
 Failed counts and individual results. Check individual songs or **Select all songs**,
@@ -154,6 +154,27 @@ analyses in the selected subset. This standalone action (`POST /api/set-builder/
 with an explicit `trackIds` array) stops before Meta selection and preserves
 an existing selected order. **Modal accelerate** is visible but disabled.
 Building a playlist still analyzes any remaining library songs before Meta selection.
+The **Muse Spark music features** node is an explicit action: select MP3/WAV songs
+whose local analysis is ready, then **Call Meta Spark (N)**. It sends the whole
+original audio and the exact music-feature-extractor experiment prompt to
+`muse-spark-1.2` with `max_tokens=4000`, no automatic retries. The HTTP transport
+uses the Python standard library to match the bridge's dependency conventions.
+It describes genre, groove, bass, instruments, vocals, harmony, arrangement and
+mood without requesting mixing advice or invented timing/key details.
+
+Per-song status, latency, usage, response text and a raw JSON link are visible.
+Results are stored under ignored `artifacts/music-features/<audio-hash>/<prompt-config-hash>/`;
+each attempt retains its raw response and run metadata. A successful matching
+result is reused across restarts. Empty/truncated responses fail and can be retried;
+interrupted requests do not restart automatically. Opening the node sends no audio.
+Building a playlist does not automatically call the music extractor: available
+descriptions are passed separately as unverified `musicFeatures`, missing ones
+remain unknown, and DSP remains authoritative for measured timing and energy.
+The existing file-tag genre is retained as its own field. Semantic accuracy has
+not been validated. On 2026-11-02 the user reported successfully running one real
+song through both product nodes (All-In-One + DSP and Muse Spark). This confirms
+a single-song workflow, not semantic accuracy or multi-track selection quality.
+
 Click the **Select & order** node to open the playlist dialog. **Build a new
 playlist** accepts a natural-language request; explicit song counts populate
 the visible Tracks field, which is authoritative when sent. The conversation

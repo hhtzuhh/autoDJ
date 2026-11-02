@@ -36,7 +36,18 @@ export interface QueueItem extends Track {
   state: "played" | "current" | "next" | "queued";
 }
 
+export interface MusicFeatureResult {
+  status: "pending" | "queued" | "running" | "ready" | "failed";
+  model?: string; modelReturned?: string; origin?: string;
+  content?: string | null; error?: string | null;
+  jobId?: string; startedAt?: string; requestStartedAt?: string | null; finishedAt?: string;
+  elapsedSeconds?: number; finishReason?: string; rawAvailable?: boolean;
+  usage?: {prompt_tokens?: number; completion_tokens?: number; total_tokens?: number} | null;
+}
+
 export interface PreparedTrack {
+  audioFormat?: string;
+  musicFeatures?: MusicFeatureResult | null;
   analysisSummary?: Record<string, unknown> | null;
   analysisOrigin?: "cache" | "computed" | "available" | "pending" | "unknown";
   analysisRun?: {
@@ -191,7 +202,7 @@ export interface CopilotState {
   flowTelemetry?: LiveFlowTelemetry;
   setBuilder?: {
     selectionOnly?: boolean;
-    buildPhase?: "analysis_only" | "library_ready" | "library_analysis" | "curation" | "selection_complete" | "transitions";
+    buildPhase?: "music_features" | "analysis_only" | "library_ready" | "library_analysis" | "curation" | "selection_complete" | "transitions";
     library?: PreparedTrack[];
     buildId?: string;
     curatorCalls?: CuratorCall[];

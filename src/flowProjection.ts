@@ -40,6 +40,10 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
   const cached = readyTracks.filter(t => t.analysisOrigin === "cache").length;
   const available = readyTracks.filter(t => t.analysisOrigin === "available").length;
   const computed = readyTracks.filter(t => t.analysisOrigin === "computed").length;
+  const musicReady = tracks.filter(t => t.musicFeatures?.status === "ready");
+  const musicRunning = tracks.filter(t => t.musicFeatures?.status === "running");
+  const musicQueued = tracks.filter(t => t.musicFeatures?.status === "queued");
+  const musicFailed = tracks.filter(t => t.musicFeatures?.status === "failed");
   const edges = b?.transitions ?? [];
   const readyEdges = edges.filter(e => e.status === "analyzed" || e.status === "ready");
   const blockedEdges = edges.filter(e => e.status === "blocked");
@@ -73,6 +77,11 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
   // Analysis precedes curation; this branch deliberately ends at selected order.
   [preparation[1], preparation[2]] = [preparation[2], preparation[1]];
   if (b?.selectionOnly) preparation.splice(3);
+  preparation.splice(2, 0, node("music", "Muse Spark music features", "META · MUSE SPARK 1.2",
+    musicRunning.length || musicQueued.length ? "running" : musicFailed.length ? "error" : tracks.length && musicReady.length === tracks.length ? "done" : tracks.length ? "waiting" : "idle",
+    `${musicReady.length}/${tracks.length} ready${musicRunning.length ? ` · ${musicRunning.length} calling` : ""}${musicQueued.length ? ` · ${musicQueued.length} queued` : ""}${musicFailed.length ? ` · ${musicFailed.length} failed` : ""}`,
+    "Explicit audio requests for selected songs after local analysis. Genre, groove, bass, instruments, vocals, harmony, arrangement and mood are unverified model interpretations. Ready descriptions are included in later playlist selection; missing ones remain unknown.",
+    tracks.map(t => ({track: t.title, result: t.musicFeatures ?? null}))));
   if (!live || !state.connected || disconnected) preparation.forEach(n => {n.status = "stale"; n.label = !live ? "No live preparation data" : "Last known · disconnected";});
   const p = state.plan;
   const planningCalls = p.metaCalls ?? [];
@@ -114,6 +123,13 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
   ];
   if (!fresh && a?.enabled) crowd.slice(2).forEach(n => {n.status = "stale"; n.label = "Waiting for live DJ evidence";});
   const records: CallRecord[] = [
+    ...tracks.flatMap(t => {
+      const m = t.musicFeatures;
+      return m?.requestStartedAt ? [{id: m.jobId ?? `music-${t.id}`, scope: "Music feature extraction", model: m.model ?? "muse-spark-1.2",
+        status: m.status === "running" ? "calling" : m.status === "ready" ? "completed" : m.status,
+        startedAt: Date.parse(m.requestStartedAt), finishedAt: m.finishedAt ? Date.parse(m.finishedAt) : null,
+        seconds: m.elapsedSeconds, tokens: m.usage?.completion_tokens, detail: `${t.title}${m.origin === "cache" ? " · retained cached result" : ""}${m.error ? ` · ${m.error}` : ""}`}] : [];
+    }),
     ...calls.map((c, i) => ({id: c.id ?? `curator-${c.startedAt}-${i}`, scope: c.stage === "curation" ? "Set curation" : c.stage === "post_analysis" ? "Post-analysis order" : "Set preparation", model: c.model, status: c.status,
       startedAt: Date.parse(c.startedAt), finishedAt: c.finishedAt ? Date.parse(c.finishedAt) : null, seconds: c.responseSeconds, tokens: c.completionTokens})),
     ...planningCalls.map(c => ({id: c.id, scope: c.scope === "crowd_adaptive" ? "Crowd-driven planning" : c.scope === "future_buffer" ? "Future buffer" : "Current transition", model: c.model, status: c.status, startedAt: c.startedAt, finishedAt: c.finishedAt, seconds: c.responseSeconds, tokens: c.completionTokens, detail: c.detail})),
@@ -121,5 +137,5 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
       startedAt: Date.parse(j.requestedAt), finishedAt: j.finishedAt ? Date.parse(j.finishedAt) : null, seconds: j.modelSeconds}] : []),
   ].sort((x, y) => y.startedAt - x.startedAt).slice(0, 12);
   return {preparation, liveNodes, crowd, records, fresh, completed: fresh ? telemetry?.completedTransitions ?? 0 : null,
-    inFlight: fresh ? calling.length + calls.filter(c => c.status === "calling").length + Number(visionInFlight) : null};
+    inFlight: fresh ? calling.length + calls.filter(c => c.status === "calling").length + musicRunning.filter(t => t.musicFeatures?.requestStartedAt).length + Number(visionInFlight) : null};
 }
