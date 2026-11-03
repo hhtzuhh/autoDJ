@@ -89,6 +89,7 @@ export type TransitionEdgeStatus =
   | "invalidated";
 
 export interface MetaOrigin {
+  memoryContext?: import('./PlanningMemory').MemoryContext | null;
   requestId: string;
   requestedAt: number;
   selectedAt: number;
@@ -207,6 +208,7 @@ export interface PerformanceEvent {
 }
 
 export interface CopilotState {
+  setRun?: import("./crowdChanges").SetRun | null;
   dataSource: DataSource;
   connected: boolean;
   autoArmEnabled: boolean;
@@ -302,7 +304,5 @@ export interface WebcamFlowState {
   job: {id: string; status: string; stage: string; model?: string; modelSeconds?: number;
     requestedAt?: string; finishedAt?: string; remoteFileCleanup?: string;
     observation?: {summary_en: string}; cue?: {value: string}} | null;
-  adaptive: {enabled: boolean; status: string; reason: string;
-    decision?: {reason: string; planId: string; queueChanged: boolean; observationId: string};
-    lastApplied?: {reason: string; planId: string; executionStatus?: string; observationId: string}} | null;
+  adaptive: import('./crowdChanges').AdaptiveState | null;
 }

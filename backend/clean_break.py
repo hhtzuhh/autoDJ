@@ -14,6 +14,8 @@ Choose exactly one supplied clean-break DJ candidate. Local code has already
 bounded track identity, analyzed exit/entry beats, and queue revision. Never
 invent IDs or timing. Return exactly one JSON object containing only
 selected_candidate_id, confidence, and reason.
+The handoff uses fade_out_cut: fade the source to silence over 0.5 seconds,
+then start the target at native tempo. Direct clean cuts are disabled.
 """.strip()
 
 
@@ -94,6 +96,7 @@ def compile_clean_break_plan(
         "transition_mode": "clean_break",
         "source_start_mode": "continue_playing",
         "completion_mode": "continue_target",
+        "allow_clean_cut": False,
         "deck_a": {
             "audio_sha256": source_id,
             "analysis_cache_key": source.analysis_cache_key,
@@ -110,6 +113,8 @@ def compile_clean_break_plan(
             "cue_beat_index": entry_beat,
         },
         "mix": {
+            "technique": "fade_out_cut",
+            "fade_out_seconds": 0.5,
             "handoff": "target_start_then_crossfader_cut_then_source_stop",
             "tempo_source": "native_file_bpm_no_sync",
             "tail_beats": 0,

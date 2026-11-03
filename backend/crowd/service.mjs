@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, access } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -37,6 +37,22 @@ export async function normalizeClip(body, start, dir) {
 export function createCrowdServer({storageRoot, key, fetchImpl = fetch, normalize = normalizeClip}) {
   const jobs = new Map();
   let activeJobId = null;
+  async function storedJob(id) {
+    if (jobs.has(id)) return jobs.get(id);
+    try {
+      const job = JSON.parse(await readFile(path.join(storageRoot, id, 'result.json'), 'utf8'));
+      if (job.id !== id || !['completed', 'failed'].includes(job.status)) return null;
+      job.rawResponseAvailable = await access(path.join(storageRoot, id, 'muse-response.json')).then(() => true, () => false);
+      if (!jobs.has(id)) jobs.set(id, job);
+      return jobs.get(id);
+    } catch { return null; }
+  }
+  let historyLoaded;
+  function restoreHistory() {
+    return historyLoaded ??= readdir(storageRoot, {withFileTypes: true}).then(entries =>
+      Promise.all(entries.filter(e => e.isDirectory() && new RegExp(`^${ID}$`).test(e.name)).map(e => storedJob(e.name)))
+    ).catch(error => { if (error.code !== 'ENOENT') { historyLoaded = null; throw error; } });
+  }
   async function api(route, options = {}) {
     let response;
     try {
@@ -70,13 +86,16 @@ export function createCrowdServer({storageRoot, key, fetchImpl = fetch, normaliz
       const prompt = job.mode === 'webcam' ? webcamPrompt(duration) : crowdPrompt(duration);
       await writeFile(path.join(dir, 'muse-prompt.txt'), prompt);
       job.stage = 'Muse Spark is observing the clip';
+      job.modelRequestedAt = new Date().toISOString();
       const started = performance.now();
       const response = await (await api('/responses', {method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({model: MODEL, input: [{type: 'message', role: 'user', content: [
           {type: 'input_text', text: prompt}, {type: 'input_file', file_id: fileId}
         ]}]})})).json();
       job.modelSeconds = (performance.now() - started) / 1000;
+      job.modelRespondedAt = new Date().toISOString();
       await writeFile(path.join(dir, 'muse-response.json'), JSON.stringify(response, null, 2));
+      job.rawResponseAvailable = true;
       if (response.status !== 'completed') throw new Error('Meta did not complete the observation. Raw response retained locally.');
       const output = response.output?.flatMap(item => item.content || [])
         .filter(item => item.type === 'output_text').map(item => item.text).join('') || '';
@@ -120,11 +139,22 @@ export function createCrowdServer({storageRoot, key, fetchImpl = fetch, normaliz
       if (req.method === 'GET' && url.pathname === '/api/crowd/status') {
         return send(200, {keyConfigured: Boolean(key), model: MODEL, activeJobId, mode: 'uploaded_clip', observationOnly: true});
       }
-      const match = url.pathname.match(new RegExp(`^/api/crowd/jobs/(${ID})(/clip)?$`));
+      if (req.method === 'GET' && url.pathname === '/api/crowd/jobs') {
+        await restoreHistory();
+        const mode = url.searchParams.get('mode');
+        if (mode && !['webcam', 'uploaded_clip'].includes(mode)) return send(400, {error: 'Unknown capture mode.'});
+        return send(200, {jobs: [...jobs.values()].filter(job => !mode || job.mode === mode)
+          .sort((a, b) => String(b.captureTime ?? b.requestedAt).localeCompare(String(a.captureTime ?? a.requestedAt)))});
+      }
+      const match = url.pathname.match(new RegExp(`^/api/crowd/jobs/(${ID})(/clip|/response)?$`));
       if (req.method === 'GET' && match) {
-        const job = jobs.get(match[1]);
-        if (!job) return send(404, {error: 'Observation is not available in this service session.'});
+        const job = await storedJob(match[1]);
+        if (!job) return send(404, {error: 'Observation is not available.'});
         if (!match[2]) return send(200, job);
+        if (match[2] === '/response') {
+          if (!job.rawResponseAvailable) return send(404, {error: 'No raw Meta response is available yet.'});
+          return send(200, JSON.parse(await readFile(path.join(storageRoot, job.id, 'muse-response.json'), 'utf8')));
+        }
         if (!job.clipAvailable) return send(404, {error: 'Prepared clip is not available yet.'});
         const data = await readFile(path.join(storageRoot, job.id, 'clip.mp4'));
         const range = req.headers.range;
@@ -151,6 +181,8 @@ export function createCrowdServer({storageRoot, key, fetchImpl = fetch, normaliz
         const mode = url.searchParams.get('mode') || 'uploaded_clip';
         const session = url.searchParams.get('session');
         const captured = url.searchParams.get('capturedAt');
+        const setRunId = url.searchParams.get('setRunId');
+        if (setRunId && !/^set-[0-9]{6,}$/.test(setRunId)) return send(400, {error: 'Invalid set run ID.'});
         if (!['uploaded_clip', 'webcam'].includes(mode)) return send(400, {error: 'Unknown capture mode.'});
         if (mode === 'webcam' && (start !== 0 || !/^[a-f0-9-]{36}$/.test(session || '')
           || !captured || !Number.isFinite(Date.parse(captured)) || Date.now() - Date.parse(captured) > 20_000
@@ -165,7 +197,7 @@ export function createCrowdServer({storageRoot, key, fetchImpl = fetch, normaliz
           }
           if (!size) { activeJobId = null; return send(400, {error: 'Choose a nonempty video file.'}); }
           const job = {id, status: 'running', stage: 'Video received', model: MODEL, profile: mode === 'webcam' ? 'webcam-v1' : 'crowd-v1',
-            requestedAt: new Date().toISOString(), sourceStartSeconds: start, mode, webcamSession: mode === 'webcam' ? session : null,
+            requestedAt: new Date().toISOString(), sourceStartSeconds: start, mode, setRunId: mode === 'webcam' ? setRunId : null, webcamSession: mode === 'webcam' ? session : null,
             observationOnly: true, humanReview: 'pending', captureTime: mode === 'webcam' ? new Date(captured).toISOString() : null,
             historyComparison: 'unavailable', musicEventComparison: 'unavailable'};
           jobs.set(id, job);

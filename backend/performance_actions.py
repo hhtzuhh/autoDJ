@@ -22,10 +22,10 @@ ACTION_CATALOG = {
     },
     "crossfade": {
         "purpose": "Bring the next song in while removing the current song at a common tempo.",
-        "parameters": {"start_beat": 0, "duration_beats": "exact candidate transition_bars * 4", "curve": "linear or late_cut",
+        "parameters": {"start_beat": 0, "duration_beats": "exact candidate transition_bars * 4", "curve": "linear only",
                        "target_bpm": "numeric BPM within candidate tempo_bounds"},
-        "timing": "Target starts at its analyzed entry cue. late_cut keeps it inaudible until the final beat.",
-        "tradeoff": "Linear allows longer musical overlap; late_cut makes a short handoff after a silent target lead-in. Avoid conflicting vocals or bass.",
+        "timing": "Target starts audibly at its analyzed entry cue and blends throughout the window.",
+        "tradeoff": "Allows sustained musical overlap. Avoid conflicting vocals or bass.",
         "optional": False,
     },
     "bass_swap": {
@@ -42,13 +42,6 @@ ACTION_CATALOG = {
         "tradeoff": "Creates contrast but can reduce momentum. Not automatically better than leaving EQ neutral.",
         "optional": True,
     },
-    "cut_to_next": {
-        "purpose": "Switch between native tempos without overlapping mismatched rhythms.",
-        "parameters": {"start_beat": 0, "fade_out_seconds": "0 for direct cut or 0.5 for fade then cut"},
-        "timing": "Start target at supplied entry after the optional source fade; stop source.",
-        "tradeoff": "Can suit an intentional contrast or sparse boundary. Explain the musical reason; do not choose solely because a local heuristic score is highest.",
-        "optional": False,
-    },
 }
 
 # Exact wire shapes, separate from the human-readable parameter descriptions.
@@ -59,7 +52,6 @@ ACTION_SHAPE_EXAMPLES = [
     {"function": "crossfade", "start_beat": 0, "duration_beats": 16, "curve": "linear", "target_bpm": 130},
     {"function": "bass_swap", "start_beat": 0, "duration_beats": 8},
     {"function": "bass_dip", "start_beat": 0, "duration_beats": 8},
-    {"function": "cut_to_next", "start_beat": 0, "fade_out_seconds": 0},
 ]
 
 
@@ -90,11 +82,22 @@ def tempo_ramp_options(edge: dict) -> list[dict]:
     bounds = edge.get("tempo_bounds")
     if edge.get("mode") == "clean_break" or not bounds:
         return []
-    common_bpms = sorted({bounds["minimum_bpm"], bounds["maximum_bpm"], bounds["suggested_common_bpm"]})
-    return [{"common_bpm": bpm,
-             "minimum_source_ramp_beats": minimum_ramp_beats(bounds["source_native_bpm"], bpm) if abs(bpm-bounds["source_native_bpm"]) > .001 else 0,
-             "minimum_target_return_beats": minimum_ramp_beats(bpm, bounds["target_native_bpm"]) if abs(bpm-bounds["target_native_bpm"]) > .001 else 0}
-            for bpm in common_bpms]
+    common_bpms = sorted({bounds["minimum_bpm"], bounds["maximum_bpm"], bounds["suggested_common_bpm"],
+                         bounds["source_native_bpm"], bounds["target_native_bpm"]})
+    available = edge["source_exit_beat_index"] - edge.get("earliest_source_action_beat", 8)
+    options = []
+    for bpm in common_bpms:
+        if not bounds["minimum_bpm"] <= bpm <= bounds["maximum_bpm"]:
+            continue
+        pre = minimum_ramp_beats(bounds["source_native_bpm"], bpm) if abs(bpm-bounds["source_native_bpm"]) > .001 else 0
+        post = minimum_ramp_beats(bpm, bounds["target_native_bpm"]) if abs(bpm-bounds["target_native_bpm"]) > .001 else 0
+        if pre > min(MAX_RAMP_BEATS, available) or post > MAX_RAMP_BEATS:
+            continue
+        if edge["target_entry_beat_index"] + edge["transition_bars"] * 4 + post >= edge.get("target_beat_count", float("inf")):
+            continue
+        options.append({"common_bpm": bpm, "minimum_source_ramp_beats": pre,
+                        "minimum_target_return_beats": post})
+    return options
 
 
 def number(value, label):
@@ -111,6 +114,8 @@ def integer(value, label):
 
 
 def validate_edge_actions(edge: dict, actions: list) -> dict:
+    if edge["mode"] == "clean_break":
+        raise ValueError("Cut transitions are disabled for this demo; choose a beat-synced blend candidate")
     if not isinstance(actions, list) or not 1 <= len(actions) <= 4:
         raise ValueError("each transition requires 1..4 actions, including one handoff")
     grouped = {}
@@ -132,13 +137,8 @@ def validate_edge_actions(edge: dict, actions: list) -> dict:
     if len(handoffs) != 1 or handoffs[0]["start_beat"] != 0:
         raise ValueError("exactly one handoff must start at cue beat 0")
     handoff = handoffs[0]
-    if edge["mode"] == "clean_break":
-        if len(actions) != 1 or handoff["function"] != "cut_to_next" or number(handoff["fade_out_seconds"], "fade") not in (0, .5):
-            raise ValueError("native-tempo cut only supports its optional bounded fade")
-        return {"actions": deepcopy(actions), "technique": "fade_out_cut" if handoff["fade_out_seconds"] else "clean_cut",
-                "pre_beats": 0, "post_beats": 0}
     beats = edge["transition_bars"] * 4
-    if handoff["function"] != "crossfade" or handoff["curve"] not in {"linear", "late_cut"} or integer(handoff["duration_beats"], "duration") != beats:
+    if handoff["function"] != "crossfade" or handoff["curve"] != "linear" or integer(handoff["duration_beats"], "duration") != beats:
         raise ValueError("crossfade must match the supplied cue window")
     bounds = edge.get("tempo_bounds")
     if not bounds:
@@ -169,7 +169,9 @@ def validate_edge_actions(edge: dict, actions: list) -> dict:
     if abs(bpm - bounds["target_native_bpm"]) > .001 and not post:
         raise ValueError("changed target tempo requires an explicit return-to-native ramp")
     if edge["source_exit_beat_index"] - pre < edge.get("earliest_source_action_beat", 8):
-        raise ValueError("source ramp has insufficient live runway")
+        raise ValueError(f"source ramp has insufficient live runway: starts at beat {edge['source_exit_beat_index'] - pre}, "
+                         f"earliest allowed beat is {edge.get('earliest_source_action_beat', 8)}, "
+                         f"handoff is at beat {edge['source_exit_beat_index']}. Use a feasible common BPM or another candidate.")
     if edge["target_entry_beat_index"] + beats + post >= edge.get("target_beat_count", float("inf")):
         raise ValueError("target ramp exceeds analyzed audio")
     eq = [a for a in actions if a["function"] in {"bass_swap", "bass_dip"}]
@@ -181,9 +183,7 @@ def validate_edge_actions(edge: dict, actions: list) -> dict:
             raise ValueError("low-EQ action must fit within crossfade")
         if a["function"] == "bass_dip" and duration % 2:
             raise ValueError("bass dip requires an even duration")
-        if handoff["curve"] == "late_cut":
-            raise ValueError("late cut keeps target hidden; use neutral EQ")
-    technique = eq[0]["function"] if eq else "late_cut" if handoff["curve"] == "late_cut" else "crossfade"
+    technique = eq[0]["function"] if eq else "crossfade"
     return {"actions": deepcopy(actions), "technique": technique, "pre_beats": pre, "post_beats": post,
             "common_bpm": bpm, "source_native_bpm": bounds["source_native_bpm"], "target_native_bpm": bounds["target_native_bpm"]}
 

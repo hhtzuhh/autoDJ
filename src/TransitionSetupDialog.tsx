@@ -51,6 +51,7 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
     <details className="transition-catalog">
       <summary>Available transition techniques{b?.techniques?.length ? ` (${b.techniques.length})` : ""}</summary>
       <p>Meta chooses a technique and its action parameters for each song change in one planning call. Available choices depend on the cue pair and tempo compatibility.</p>
+      <p>Demo style: sustained blends with optional bass swaps or bass dips. Clean cut, fade out cut and late cut are disabled.</p>
       <ul className="transition-catalog__techniques">
         {b?.techniques?.map(t => <li key={t.id}><strong>{t.id.replaceAll("_", " ")}</strong><p>{
           t.id === "bass_swap" ? "Crossfade while exchanging the two songs’ low EQ over the selected interval."
@@ -63,9 +64,8 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
       <details className="panel-details"><summary>Technical details · action functions{b?.actionCatalog ? ` (${Object.keys(b.actionCatalog).length})` : ""}</summary>
         <p>These functions implement the techniques above. Meta returns one action list per transition; EQ actions are optional and tempo ramps are required when the selected common BPM changes a song’s speed.</p>
         <ul className="transition-catalog__mapping">
-          <li>Crossfade / late cut → <code>crossfade</code> with a linear / late-cut curve.</li>
+          <li>Crossfade → <code>crossfade</code> with a linear curve throughout the blend.</li>
           <li>Bass swap / bass dip → <code>crossfade</code> plus <code>bass_swap</code> / <code>bass_dip</code>.</li>
-          <li>Clean cut / fade out cut → <code>cut_to_next</code> with a 0 / 0.5-second fade.</li>
           <li>Tempo adjustment → <code>ramp_tempo</code> before or after a beat-synced handoff.</li>
         </ul>
         {b?.actionCatalog && Object.entries(b.actionCatalog).map(([name, a]) => <p key={name}><strong><code>{name}</code></strong> · {a.purpose} {a.timing} <small>{a.tradeoff}</small></p>)}

@@ -92,7 +92,7 @@ class SelectedTransitionsTest(unittest.TestCase):
         store.queue={'revision':0,'ordered_track_ids':[]};store.current_track_id=None
         store.selection={};store.supervisor=None;store.envelope=None;store.transition_overrides={};store.sampler_slots={}
         store.future_transition_plan=None;store.continuous_set_active=False;store.auto_arm_enabled=False
-        store.auto_chain_cancel=threading.Event();store._arm_ready_plan_with_retry=Mock()
+        store.auto_chain_cancel=threading.Event();store._arm_started_set=Mock()
         store._install_active_queue=Mock(side_effect=lambda value:setattr(store,'queue',value))
         store._set_selection=Mock(side_effect=lambda value:setattr(store,'selection',value))
         store._write_dashboard_selection=Mock();store._append_system_event=Mock()
@@ -141,7 +141,12 @@ class SelectedTransitionsTest(unittest.TestCase):
                     plays=[c for c in probe.send_value.call_args_list if c.args[1:]==('1','play',1.0)]
                     self.assertEqual(len(plays),1 if meta_ok else 0)
                     self.assertEqual(store.auto_arm_enabled,meta_ok)
+                    if meta_ok:
+                        self.assertEqual(store._run_id(), 'set-000001')
+                        self.assertEqual(store.selection['next_executable_plan']['set_run_id'], 'set-000001')
+                        self.assertEqual(store._runs().current['status'], 'started')
                     self.assertEqual(store.request_start_set()[0],409)
+                    self.assertEqual(len(store._runs().rows), 1 if meta_ok else 0)
 
     def test_preparation_wait_accepts_delayed_identity_but_rejects_wrong_or_stale(self):
         for observed_id, revision, accepted in [('expected',2,True),('wrong',2,False),('expected',1,False)]:

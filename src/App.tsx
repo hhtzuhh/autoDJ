@@ -1,10 +1,16 @@
 import { AgentFlow } from "./AgentFlow";
 import type {BuildResult} from "./playlistRequest";
 import { CrowdWebcam } from "./CrowdWebcam";
+import { CrowdPlanChange } from "./CrowdPlanChange";
+import { useQueueMotion } from "./useQueueMotion";
+import type { AdaptiveState } from "./crowdChanges";
+import { reorderedIds, songTitle } from "./crowdChanges";
 import { useEffect, useMemo, useState } from "react";
 import { event, initialState, tracks } from "./demo";
 import { RollingPlanner } from "./MetaActivity";
 import { InTrackActions } from "./InTrackActions";
+import { PlanningMemory } from "./PlanningMemory";
+import { usePreparedQueue } from "./queuePresentation";
 import { CrowdObservation } from "./CrowdObservation";
 import type {
   CopilotState,
@@ -213,7 +219,7 @@ function TrackMini({ track }: { track: Track }) {
     <div className="track-mini">
       <div className={`track-dot track-dot--${track.accent}`} />
       <div>
-        <strong>{track.title}</strong>
+        <strong>{songTitle(track)}</strong>
         <span>{track.bpm} BPM · {track.energy} energy</span>
       </div>
     </div>
@@ -253,7 +259,7 @@ function PlanDetails({ plan, queueView = false }: { plan: Partial<Pick<Transitio
   </div>;
 }
 
-function PlanPanel({ state }: { state: CopilotState }) {
+function PlanPanel({ state, adaptive }: { state: CopilotState; adaptive?: AdaptiveState | null }) {
   const source = state.queue.find(track => track.id === state.plan.sourceTrackId)
     ?? state.decks.find(deck => deck.track?.id === state.plan.sourceTrackId)?.track;
   const target = state.queue.find(track => track.id === state.plan.targetTrackId)
@@ -288,6 +294,8 @@ function PlanPanel({ state }: { state: CopilotState }) {
           {statusLabel[state.plan.status]}
         </span>
       </div>
+
+      <CrowdPlanChange adaptive={adaptive} tracks={state.queue} />
 
       <div className="plan-route">
         <TrackMini track={source} />
@@ -329,6 +337,7 @@ function PlanPanel({ state }: { state: CopilotState }) {
       <details className="panel-details">
         <summary>Plan details</summary>
         <PlanDetails plan={state.plan} />
+        <PlanningMemory context={state.plan.metaOrigin?.memoryContext} />
         <p className="panel-details__note">{activeEdge?.candidateCount ?? "—"} local candidates · {isFixture ? "Demo fixture" : state.plan.selectedBy === "meta" ? "Selected by Meta" : "Local planning"}</p>
       </details>
 
@@ -344,18 +353,25 @@ function PlanPanel({ state }: { state: CopilotState }) {
 
 function QueuePanel({
   state,
+  adaptive,
   disabled,
   onReorder,
 }: {
   state: CopilotState;
+  adaptive?: AdaptiveState | null;
   disabled: boolean;
   onReorder: (trackIds: string[]) => Promise<void>;
 }) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const builder = state.dataSource === "live" ? state.setBuilder : undefined;
-  const prepared = Boolean(builder?.queue.length);
+  const prepared = usePreparedQueue(state);
   const queueDragLocked = true;
   const shownQueue = prepared ? builder!.queue : state.queue;
+  const queueMotion = useQueueMotion(shownQueue.map(track => track.id));
+  const appliedChange = !prepared && adaptive?.lastApplied?.queueChanged
+    && JSON.stringify(adaptive.lastApplied.after) === JSON.stringify(shownQueue.map(track => track.id))
+    ? adaptive.lastApplied : null;
+  const movedIds = appliedChange ? reorderedIds(appliedChange.before, appliedChange.after) : [];
   const liveEdges = new Map(
     (state.transitions ?? []).map((transition) => [
       `${transition.sourceTrackId}:${transition.targetTrackId}`,
@@ -395,7 +411,7 @@ function QueuePanel({
           <span className="eyebrow">
             {prepared ? `Preparation revision ${builder!.queueRevision}` : `Revision ${state.queueRevision}`}
           </span>
-          <h2>{prepared ? "Tonight’s set" : "Queue"}</h2>
+          <h2>{state.dataSource === "live" ? "Tonight’s set" : "Queue"}</h2>
         </div>
         <span className="count-badge">
           {liveBuffer.length >= 2
@@ -403,7 +419,8 @@ function QueuePanel({
             : `${shownQueue.length} tracks`}
         </span>
       </div>
-      <div className="queue-list" role="list" aria-label="Performance queue">
+      {appliedChange && <p className="queue-change-note" role="status">Webcam order applied · {movedIds.length} songs changed position. See AI plan for the comparison.</p>}
+      <div className="queue-list" ref={queueMotion} role="list" aria-label="Performance queue">
         {shownQueue.map((track, index) => {
           const transition = edgeAfter.get(track.id);
           const bufferSlot = liveBuffer.findIndex((item) => item.id === track.id);
@@ -421,6 +438,7 @@ function QueuePanel({
             <div
               className={`queue-item ${draggedId === track.id ? "is-dragging" : ""}`}
               key={track.id}
+              data-track-id={track.id}
               role="listitem"
               draggable={prepared && !disabled && !queueDragLocked}
               onDragStart={() => setDraggedId(track.id)}
@@ -433,9 +451,10 @@ function QueuePanel({
                   {liveTrack?.state === "current" ? <Icon name="play" /> : index + 1}
                 </span>
                 <div className="queue-row__identity">
-                  <strong>{track.title}</strong>
+                  <strong>{songTitle(track)}</strong>
                   <span>
                     {track.bpm ? `${Math.round(track.bpm)} BPM` : "BPM pending"}
+                    {appliedChange && movedIds.includes(track.id) && <small className="queue-move-label"> · {appliedChange.before.indexOf(track.id) + 1} → {index + 1}</small>}
                   </span>
                 </div>
                 <span className={`queue-row__state ${analysisStatus ? `analysis--${analysisStatus}` : ""}`}>
@@ -512,6 +531,7 @@ function TransitionReadiness({
             <br />Request {edge.metaOrigin.requestId} · candidate {edge.metaOrigin.candidateId ?? "pair selection"}
           </p>}
           {usesMeta && !edge.metaOrigin && <p className="panel-details__note">Earlier Meta decision · request history unavailable</p>}
+          <PlanningMemory context={(plan?.metaOrigin ?? edge.metaOrigin)?.memoryContext} />
           </details>
         </div>
       </details>
@@ -968,7 +988,7 @@ function App() {
         </div>
         <div id="control-view" role="tabpanel" aria-labelledby="control-tab" hidden={view !== "control"}>
         <section className="hero-strip">
-          <span className="eyebrow">Live control room</span>
+          <span className="eyebrow">Live control room{state.setRun && ` · Set #${String(state.setRun.number).padStart(6, "0")}`}</span>
           <div className="cue-countdown">
             <span>Next cue</span>
             <strong>{beatsUntilCue == null ? "—" : Math.max(0, beatsUntilCue)}</strong>
@@ -982,17 +1002,20 @@ function App() {
           ))}
         </div>
 
-        <div className="workspace-grid">
-          <PlanPanel state={state} />
+        <div className="performance-grid">
+          <CrowdWebcam setRun={state.setRun} live={state.dataSource === "live" && state.connected} tracks={state.queue} onTelemetry={setWebcamTelemetry} />
+          <PlanPanel state={state} adaptive={webcamTelemetry?.adaptive} />
           <QueuePanel
             state={state}
+            adaptive={webcamTelemetry?.adaptive}
             disabled={actionPending || state.plan.status === "executing"}
             onReorder={reorderSet}
           />
+        </div>
+        <div className="workspace-grid">
           <RollingPlanner state={state} />
           <EventLog events={state.events} />
         </div>
-        <CrowdWebcam live={state.dataSource === "live" && state.connected} tracks={state.queue} onTelemetry={setWebcamTelemetry} />
         <CrowdObservation />
         </div>
       </main>

@@ -132,9 +132,9 @@ test('real ffmpeg normalization removes audio, fixes timing and rejects undecoda
 
 
 test('webcam route preserves capture provenance and rejects stale sessions before model access', async t => {
-  const {server, calls} = await setup(t, {observation: {observation: empty, cue: {value: 'unknown', evidence_ids: []}}, expectedStart: 0});
+  const {server, calls, root} = await setup(t, {observation: {observation: empty, cue: {value: 'unknown', evidence_ids: []}}, expectedStart: 0});
   const session = '12345678-1234-1234-1234-123456789abc';
-  const send = capturedAt => dispatch(server, `/api/crowd/analyze?${new URLSearchParams({mode: 'webcam', session, capturedAt})}`,
+  const send = capturedAt => dispatch(server, `/api/crowd/analyze?${new URLSearchParams({mode: 'webcam', session, capturedAt, setRunId: 'set-000023'})}`,
     {method: 'POST', body: 'synthetic', headers: {'content-type': 'application/octet-stream'}});
   assert.equal((await send(new Date(Date.now() - 30000).toISOString())).status, 400);
   assert.equal(calls.length, 0);
@@ -143,6 +143,48 @@ test('webcam route preserves capture provenance and rejects stale sessions befor
   const job = await until(async () => {const j = (await dispatch(server, `/api/crowd/jobs/${accepted.json().id}`)).json(); return j.status !== 'running' && j;});
   assert.equal(job.status, 'completed'); assert.equal(job.profile, 'webcam-v1');
   assert.equal(job.webcamSession, session); assert.equal(job.captureTime, captured);
+  assert.equal(job.setRunId, 'set-000023');
+  await until(async () => {try {return JSON.parse(await readFile(path.join(root, job.id, 'result.json'))).setRunId === 'set-000023';} catch {return false;}});
+  const restored = createCrowdServer({storageRoot: root, key: ''});
+  assert.equal((await dispatch(restored, `/api/crowd/jobs/${job.id}`)).json().setRunId, 'set-000023');
   assert.equal(job.cue.value, 'unknown'); assert.equal(job.remoteFileCleanup, 'deleted');
   assert.match(JSON.parse(calls[1].options.body).input[0].content[0].text, /WEBCAM PROFILE/);
+});
+
+test('history shows an actual in-flight Meta call and its response without resubmission', async t => {
+  let release;
+  const gate = new Promise(resolve => {release=resolve;});
+  const {server,calls}=await setup(t,{gate});
+  const id=(await upload(server)).json().id;
+  const pending=await until(async()=>{
+    const list=(await dispatch(server,'/api/crowd/jobs')).json().jobs;
+    return list.find(j=>j.id===id && j.modelRequestedAt);
+  });
+  assert.equal(pending.status,'running');assert.equal(pending.modelRespondedAt,undefined);
+  assert.equal((await dispatch(server,`/api/crowd/jobs/${id}/response`)).status,404);
+  release();
+  const completed=await until(async()=>{
+    const list=(await dispatch(server,'/api/crowd/jobs')).json().jobs;
+    return list.find(j=>j.id===id && j.status==='completed');
+  });
+  assert.ok(completed.modelRespondedAt);assert.equal(completed.rawResponseAvailable,true);
+  const raw=await dispatch(server,`/api/crowd/jobs/${id}/response`);
+  assert.equal(raw.status,200);assert.equal(raw.json().status,'completed');
+  assert.equal(raw.bytes.toString().includes('synthetic-secret'),false);
+  assert.equal(calls.filter(c=>c.url.endsWith('/responses')).length,1);
+});
+
+test('restart restores failed results, raw response and clips; history reads never call Meta', async t => {
+  const {server,root}=await setup(t,{observation:{...empty,unexpected:'synthetic invalid field'}});
+  const id=(await upload(server)).json().id;
+  await until(async()=> (await dispatch(server,`/api/crowd/jobs/${id}`)).json().status==='failed');
+  await until(async()=> {try {return JSON.parse(await readFile(path.join(root,id,'result.json'))).status==='failed';} catch {return false;}});
+  const restored=createCrowdServer({storageRoot:root,key:'',fetchImpl:()=>{throw new Error('No network permitted');}});
+  const history=(await dispatch(restored,'/api/crowd/jobs?mode=uploaded_clip')).json().jobs;
+  assert.equal(history.length,1);assert.equal(history[0].status,'failed');
+  assert.equal((await dispatch(restored,'/api/crowd/jobs?mode=webcam')).json().jobs.length,0);
+  assert.equal((await dispatch(restored,`/api/crowd/jobs/${id}/response`)).status,200);
+  assert.equal((await dispatch(restored,`/api/crowd/jobs/${id}/clip`)).status,200);
+  assert.equal((await dispatch(restored,'/api/crowd/jobs',{headers:{origin:'https://untrusted.example'}})).status,403);
+  assert.equal((await dispatch(restored,'/api/crowd/jobs?mode=bad')).status,400);
 });

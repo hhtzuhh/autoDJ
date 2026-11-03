@@ -25,3 +25,13 @@ test('empty or uncertain scenes can remain unknown without inventing a command',
   v.observation.quality.visibility = 'insufficient'; v.cue = {value: 'unknown', evidence_ids: []};
   assert.equal(validateWebcam(v, 6).cue.value, 'unknown');
 });
+
+test('number 1 reorder requires a timed visible pose just like other explicit cues', () => {
+  const v = fixture(); v.cue.value = 'reorder';
+  v.observation.evidence[0].observation = 'One upright index finger extended, other fingers folded, held continuously.';
+  assert.equal(validateWebcam(v, 6).cue.value, 'reorder');
+  v.observation.evidence[0].end_seconds = 2;
+  assert.throws(() => validateWebcam(v, 6), /two seconds/);
+  v.cue.evidence_ids = [];
+  assert.throws(() => validateWebcam(v, 6));
+});

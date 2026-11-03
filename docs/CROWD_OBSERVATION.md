@@ -14,6 +14,8 @@ are required beyond the dashboard dependencies.
 
 1. Set `MODEL_API_KEY` in your shell environment or repository `.env` (see
    `.env.example`). The key stays on the service; it is never sent to the browser.
+   In the private workspace, the service also accepts the existing sibling
+   `experiments/meta-dj-agent/.env` when the key is otherwise unset.
 2. From the repository root, run `npm run crowd` in one terminal.
 3. Run `npm run dev` in another terminal and open `http://127.0.0.1:5173`.
 4. In **Crowd observation**, select a local video up to 40 MB, choose its start
@@ -56,14 +58,45 @@ least two seconds means `build`; forearms crossed in an X at the chest for at
 least two seconds means `ease`. Brief, obscured, conflicting, or uncertain poses
 are not commands. This is a user-enabled convention, not inferred intention.
 
-Natural movement follows a documented demo heuristic: two consecutive good,
-stable-camera observations within 90 seconds must both show some/most moving
-with moderate/large sustained motion (`build`), or none/few moving with
-still/subtle absent/intermittent motion (`ease`). Intermediate states hold the
-existing direction. This does not establish enjoyment, boredom, musical
-preference, dance style, or beat synchronization. Gesture accuracy and useful
-musical response have not been calibrated. Incidental poses can be mistaken for
-commands; the evidence remains inspectable.
+Ordinary movement and stillness are recorded with capture-time song context;
+they never trigger adaptive planning. Hold number 1 for at least two seconds to
+request remaining-song reorder. Arms overhead requests more in-track effect;
+crossed forearms requests less. The latter two preserve song order. Each held
+pose triggers once, and a clear observed release re-arms it. Unknown does not
+count as release. Meta may leave in-track actions unchanged when no suitable
+slot exists. A handoff-only change does not fulfill an in-track request and is
+not applied. Incidental poses can still be mistaken for commands; inspect the
+vision evidence. No enjoyment, preference or causal response is inferred.
+
+### Observation log
+
+**Observed · Capture log** shows every capture, independently of Adaptive DJ or
+whether playback is running. Recording creates a local row immediately; service
+acceptance, the actual Muse request timestamp, response timestamp, model duration,
+accepted observation and errors update that same row. Responses remain visible
+when a new capture starts. Clips/evidence, raw saved Meta responses and structured
+job status each have a closed-by-default disclosure. Reading history or raw
+responses never submits another model request.
+
+The service restores completed/failed `result.json` files from the existing UUID
+artifact folders after restart. Older jobs without precise model request timestamps
+are labeled explicitly; timestamps are not reconstructed from guesses. The log
+continues checking accepted jobs after the camera stops, so a late response is
+still visible. Local recordings stopped before service acceptance exist only in
+the current page's log. The six-second capture is followed by inference/cleanup
+and a five-second pause; it is not a fixed six-second polling interval.
+
+Starting another set or restarting observation does not clear these job records.
+Each camera start has a `webcamSession`; each submitted clip has a unique job ID.
+New webcam jobs freeze the shared set-run ID at capture start. Adaptive
+memory associates capture-time deck/plan telemetry when enabled; observation-only
+jobs do not automatically identify the playing set or its action plans.
+
+November 3 log verification: 16 vision-service and 27 frontend tests pass, plus
+the production build. Tests cover in-flight calls, raw response retrieval,
+history restoration including failures, deduplication, stopped uploads and stale
+poll responses. Chrome displayed ten existing webcam records and expanded a saved
+raw response. Continuous fresh camera capture with this UI remains an operator check.
 
 The bridge fetches the completed job from the fixed local vision endpoint. It
 requires a current camera session, increasing capture timestamps, unseen job ID,
@@ -71,19 +104,26 @@ and capture age no greater than 120 seconds. A five-second browser heartbeat
 renews an 18-second lease. Stopping Auto arm, human invalidation/takeover, missing
 heartbeat, or a changed planning context prevents pending work from applying.
 Unknown/conflicting gestures or unreliable visibility invalidate staged/in-flight
-decisions. A natural reversal needs two consistent clips; a brief neutral window
-does not revoke a held-gesture decision before its 120-second expiry.
-There is a 60-second cooldown after application and after planning failures.
+decisions. Ordinary movement does not revoke an accepted gesture proposal.
+Evidence expires after 120 seconds. New explicit gestures can retry after a
+clear release; repeated held poses cannot trigger retries. Stopping, replacement,
+or expiry records a terminal discarded reason for any staged proposal.
 
-For locked A→B, local code builds at most three orders: retain C/D/E, move D
-before C, or move E before C. Played tracks, A and B stay fixed; later tracks
-stay in place. Up to nine locally feasible transition-window candidates are
-sent to Meta in one request with the visible evidence and movement-following
-policy. Meta selects one supplied ID, including keeping the current order.
-Available techniques are existing clean breaks or beat-synced crossfades with
-validated bar lengths and optional bass swap on the first sync transition.
-No arbitrary MIDI, effects, tempo changes, new tracks or instant skips are
-accepted from model output.
+For locked A→B, the planner considers moving one remaining song next while
+preserving every other song's relative order. A number 1 request considers only changed orders; in-track requests keep the order. Up to ten next-song options span the remaining set (all
+remaining songs for the usual seven-song demo; evenly spaced choices for longer
+sets). Local validation produces at most ten candidates, distributed across
+feasible orders, for one Meta request. Meta selects only a supplied ID. No new
+tracks or instant skips are added. It plans up to four songs / three handoffs,
+with the same parameterized transition and optional in-track catalogs used by
+ordinary rolling calls. Empty in-track actions are valid.
+
+Ordinary replenishment and webcam-triggered replanning use the same scheduler.
+An observation can queue a request while another call runs; it cannot start a
+competing request. The old valid buffer stays available until an adaptive plan
+passes validation and commits. A staged adaptive plan reserves the next boundary.
+The current entire routine (including in-track actions, ramps and handoff) stays
+locked. Future windows are plans, not instructions already sent to Mixxx.
 
 The choice is staged while A→B remains unchanged. Only at the completed-transition
 boundary, before the idle deck is recycled, does the bridge recheck freshness,
@@ -94,11 +134,68 @@ that existing startup checks reject. Sampler slot identities stay fixed.
 A restarted bridge needs normal human recovery/activation, especially after
 reordering; it does not reconstruct an active camera session.
 
+Executor completion alone does not confirm the transport feedback has arrived.
+Rotation now waits up to three seconds for the expected incoming deck to be
+playing and the expected outgoing deck to be explicitly stopped. Unknown states
+are not confirmations. Cancellation interrupts the wait, changed identities or
+planning context reject it, and the observer remains free to receive MIDI.
+If rotation fails before commit, the pending adaptive decision is marked
+`application_failed`, its reason is retained in memory and shown in the webcam
+panel, and it is not represented as an applied queue change.
+
 The dashboard separates observation, staged decision, queue commit, verified
 plan promotion, arming and observed execution/completion. A committed queue is
 not proof that audio executed. Failed/late model responses preserve existing
 playback and plans. Selection and execution records are private JSONL in
 `artifacts/live-performance/crowd-decisions.jsonl` under the submission repository.
+
+## Session and cross-session memory — November 3
+
+The **Memory · music & audience** panel groups observations into capture-time
+episodes: playing song(s) and beat range, visible audience movement, the selected
+transition and its execution status, and selected versus confirmed in-track
+actions. Technical requests/decisions remain in a collapsed audit. The projection
+uses saved playback samples and matching set/plan executor journals, never events
+after the clip. `executing` alone can mean waiting for a cue and does not confirm
+a handoff or action. Missing telemetry remains unknown; playing decks are not a
+measurement of audible master output.
+
+Only explicit gesture planning receives up to four fresh (120-second), current-set
+`recentEpisodes`. Ordinary rolling replenishment receives no audience episodes;
+previous sets remain local archives for review, not live preferences. Memory
+cards are read-only and do not independently trigger planning or playback.
+
+Memory is a local append-only episodic journal at
+`artifacts/live-performance/memory/events-v1.jsonl`. It contains structured
+observations, selected proposals, supervisor lifecycle outcomes and failures.
+It is ignored by Git. No raw video is embedded in the memory journal; separate
+vision artifacts retain recordings under the policy below.
+
+The bridge samples actual deck identity, beat, play state and available controls
+approximately once per second. A returned six-second observation is associated
+with those samples at **capture time**, not response arrival. Missing coverage is
+explicitly `incomplete_telemetry`; the bridge does not substitute the current song.
+An observation can reference a prior execution event as a follow-up. This is a
+temporal association, not a causal outcome score. Supervisor lifecycle records
+do not prove every individual planned action ran; selected actions stay labeled
+as selected. Unknown observations and failed/cancelled plans are retained.
+
+Reasons must be English. Exact supplied memory is retained with the plan through
+promotion. Queue applied, action selected, action started, and action completed
+remain distinct. In-track confirmation in AI decisions comes only from matching
+set/plan executor journal events for the first source song of that decision.
+
+Start playback assigns a set-run ID. Restarting retains the journal; earlier sets
+remain archived and are not supplied to live planning. Startup reads at most the
+last 2 MB, and keeps at most 512 events in RAM; older journal data remains on
+disk but is outside this bounded retrieval horizon. This is an inspectable episodic
+archive, not a learned preference model, embedding database or automatic next-day
+playlist builder. Disk failure reports a RAM-only warning without stopping music.
+
+The UI shows **Observed → Memory → AI decision → Execution & follow-up**. Queue
+and AI-plan details expose the memory supplied to their specific call. During
+continuous playback, Tonight's set uses the live queue rather than the original
+prepared order. `Pending`, queue applied, armed and completed are distinct states.
 
 ## Data flow and retention
 
@@ -122,9 +219,10 @@ playback and plans. Selection and execution records are private JSONL in
 - Download exports the accepted observation and run metadata. Raw API responses
   remain local. A malformed model response is retained but not shown as a valid
   observation. Timestamps link to playback of the exact normalized clip.
-- The manual-upload panel can recover its last job across page reloads while the service
-  stays running. Restarting the service clears its in-memory job list; saved
-  artifacts remain on disk. This is not a persistent media library.
+- The manual-upload panel can recover its last job across page reloads. Completed
+  and failed jobs are restored from saved results after service restart, including
+  their clips and raw replies. Interrupted jobs without a completed result file
+  are not automatically resumed; inspect their local remote-file cleanup record.
 
 ## Interpretation and boundaries
 
@@ -148,8 +246,28 @@ Known limitations from the private experiments include incidental hair/eyewear
 adjustments being described as declining movement, incomplete visibility caveats,
 and inconsistent regional boundaries across calls. Manual-upload regions and IDs cannot be
 compared across clips. The webcam policy instead requires one stable whole-frame
-region and compares coarse labels, without persistent person tracking. Historical trend,
-beat synchronization and music-event attribution are unavailable.
+region and compares coarse labels, without persistent person tracking. Recent
+observations and playback telemetry can now be recalled together; beat
+synchronization, calibrated audience preferences and causal attribution remain
+unavailable.
+
+## Verification — 2026-11-03 memory integration
+
+- Offline regressions cover capture-time association across song changes,
+  cross-restart retrieval, cancelled/unknown records, disk failure and partial
+  journal writes, serialized planning, distant-song options, locked-prefix
+  preservation, boundary commit and nonempty in-track action promotion.
+- A real Muse Spark 1.3 request using existing analyzed song candidates and
+  explicitly **synthetic** memory passed action validation in 15.23 seconds.
+  The English reason referenced the observation and cancelled historical records,
+  explicitly not treating them as successful outcomes. It selected a crossfade
+  with tempo ramps and `in_track_actions: []`. This was an isolated planning test;
+  it did not alter the live queue, start the camera or play audio. Request,
+  response and validation are ignored local `artifacts/live-performance/memory-validation/`.
+- Dashboard accessibility inspection showed the four-stage panel and live queue.
+  The restarted bridge exposes memory status; the vision service loads the
+  existing local key. A new real webcam + dancing + Mixxx execution rehearsal
+  remains necessary. No claim of improved musical quality is established.
 
 ## Verification — 2026-11-01
 
@@ -187,3 +305,57 @@ Media, raw private observations and screenshots are not included in this public
 repository. Code and synthetic validation fixtures are newly developed during
 the hackathon. The adaptive implementation is a demo prototype; synthetic control tests and
 one real camera observation do not establish a successful live adaptive set.
+
+### Visible webcam plan changes
+
+AI plan shows the latest webcam decision with observation ID/time, evidence,
+reason, application state and the previous/selected next handoff. Its comparison
+expands remaining song orders and per-edge transition parameters and in-track
+actions. The bridge freezes the prior ready future window (or retained buffer)
+before inference; absent or older snapshots are explicitly unavailable.
+A proposal is not a queue commit. Completion refers only to the first handoff,
+not the whole planning window.
+
+Desktop Control room places Webcam, AI plan and Tonight's set in one row.
+When the same songs actually change order, keyed rows animate to their new
+positions. Ordinary polling and loading another set do not animate. Applied
+webcam orders show previous/new positions. Reduced-motion users get the updated
+order without movement; small screens stack the three panels.
+
+### Explicit number 1 reorder gesture
+
+With live playback and Adaptive DJ enabled, hold one upright index finger with
+other fingers folded for at least two seconds. Spark may return `cue: reorder`
+with timed evidence. This is an explicit operator convention, not a mood signal.
+It is an explicit operator request; ordinary movement is record-only.
+Only one request is accepted per held pose; a subsequent clear non-reorder clip
+must release the latch. Unknown/conflicting visibility does not release it.
+
+The planner excludes the unchanged order, keeps the playing/locked prefix and
+moves one of the remaining songs next. At least two unlocked songs and a feasible
+different order are required. Natural movement cannot replace a pending explicit
+reorder request; unclear evidence or takeover can still invalidate it. Calls use
+the shared scheduler and commit only at the existing verified handoff boundary.
+Failure preserves the queue and explains why. Synthetic tests cover timed cue
+validation, cooldown bypass, repeated poses, insufficient songs, candidate
+exclusion and unchanged active playback. Real number-1 recognition still needs
+a webcam rehearsal; the schema cannot independently verify fingers in pixels.
+
+Webcam decisions and their execution outcomes now share one chronological row
+per plan. The UI shows song titles only for orders; reasons and parameters are
+collapsed. The latest 20 webcam decisions available in bounded local memory
+are restored across restarts, with audit updates folded into the matching row.
+An old staged decision is not labeled pending without current ownership, and
+an old execution-start event without a final result does not claim completion.
+
+### Gesture-only demo verification — November 3
+
+The simplified behavior passed 218 backend tests, 38 frontend tests, 18 vision
+service tests, and the production build. New synthetic regressions cover ordinary
+movement without planning, held-pose deduplication/release for all three gestures,
+fixed song order for in-track requests, no-op preservation, staged cancellation,
+four fresh current-set observations only, and executor-confirmed action events
+isolated by set/plan ID. The restarted bridge and Chrome show the new instructions;
+both decks remain stopped and the camera is off. This change has not yet had a
+new real Meta planning call or live gesture-to-audible-action rehearsal. Existing
+recorded outcomes are retained and are not relabeled as new-policy successes.

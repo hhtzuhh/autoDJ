@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateCrowdObservation } from './observation.mjs';
+import { crowdPrompt, validateCrowdObservation } from './observation.mjs';
 
 function fixture() {
   const metric = value => ({value, evidence_ids: ['e1']});
@@ -13,6 +13,19 @@ function fixture() {
     evidence: [{id: 'e1', region_id: 'r1', start_seconds: 0, end_seconds: 2, observation: 'Small torso sways early.'},
       {id: 'e2', region_id: 'r1', start_seconds: 6, end_seconds: 8, observation: 'Similar small torso sways late.'}]};
 }
+test('prompt timestamp limit cannot round beyond the normalized clip', () => {
+  for (const duration of [6.066667, 5.933333, 6, 8]) {
+    const limit = Number(crowdPrompt(duration).match(/end_seconds <= (\d+\.\d+)/)[1]);
+    assert.ok(limit <= duration);
+    assert.ok(duration - limit < .011);
+    const v = fixture();
+    v.evidence[1].start_seconds = 3;
+    v.evidence[1].end_seconds = limit;
+    assert.doesNotThrow(() => validateCrowdObservation(v, duration));
+  }
+  const v = fixture(); v.evidence[1].start_seconds = 3; v.evidence[1].end_seconds = 6.07;
+  assert.throws(() => validateCrowdObservation(v, 6.066667));
+});
 test('accepts evidenced regional movement and an empty insufficient scene', () => {
   assert.equal(validateCrowdObservation(fixture(), 8).regions.length, 1);
   const v = fixture(); v.quality.visibility = 'insufficient'; v.regions = []; v.evidence = [];

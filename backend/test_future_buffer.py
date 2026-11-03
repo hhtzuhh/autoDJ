@@ -112,6 +112,15 @@ class FutureBufferTest(unittest.TestCase):
             self.assertFalse(store._maintain_ready_buffer())
             thread.assert_called_once()
 
+    def test_ordinary_rolling_call_omits_audience_memory_but_preserves_scope(self):
+        s = self.store
+        row = s._memory().record('execution', {'status': 'cancelled'}, ['b'])
+        def choose(candidates, **kwargs):
+            self.assertEqual(kwargs['crowd_context']['memory']['recentEpisodes'], [])
+            return self.choose(candidates, **kwargs)
+        self.run_worker(choose)
+        self.assertEqual(s.future_transition_plan['meta_origin']['memoryContext']['scope'], 'current_set_only')
+
     def test_active_or_queue_change_rejects_stale_result_and_schedules_successor(self):
         for change in ('active', 'queue'):
             with self.subTest(change=change):

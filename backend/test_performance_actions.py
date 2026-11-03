@@ -9,9 +9,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch, Mock
 
-from performance_actions import ACTION_CATALOG, ACTION_SHAPE_EXAMPLES, compile_routine, minimum_ramp_beats, tempo_bounds, validate_edge_actions, validate_window_actions
+from performance_actions import ACTION_CATALOG, ACTION_SHAPE_EXAMPLES, compile_routine, minimum_ramp_beats, tempo_bounds, tempo_ramp_options, validate_edge_actions, validate_window_actions
 from in_track_actions import compile_in_track, validate_in_track_actions
-from clean_break import compile_clean_break_plan
 from meta_planner import select_with_meta
 from live_bridge import LiveStateStore
 
@@ -34,6 +33,24 @@ def actions(common=130, target=140):
 
 
 class PerformanceActionsTest(unittest.TestCase):
+    def test_zero_source_runway_offers_native_bpm_without_impossible_preramps(self):
+        e = {**edge(100,120,128), 'earliest_source_action_beat':128}
+        self.assertEqual(tempo_ramp_options(e), [
+            {'common_bpm':100,'minimum_source_ramp_beats':0,'minimum_target_return_beats':32}])
+        selected = [{'function':'crossfade','start_beat':0,'duration_beats':16,'curve':'linear','target_bpm':100},
+                    {'function':'ramp_tempo','deck':'target','start_beat':16,'duration_beats':32,'target_bpm':120}]
+        validate_edge_actions(e, selected)
+        e['tempo_bounds'] = tempo_bounds(80,120)
+        self.assertEqual(tempo_ramp_options(e), [])  # no native-tempo overlap in bounds
+
+    def test_ramp_examples_respect_available_source_beats_and_target_length(self):
+        e = {**edge(100,120,144), 'earliest_source_action_beat':128}
+        options = tempo_ramp_options(e)
+        self.assertTrue(options)
+        self.assertTrue(all(o['minimum_source_ramp_beats'] <= 16 for o in options))
+        e['target_beat_count'] = e['target_entry_beat_index'] + 16
+        self.assertEqual(tempo_ramp_options(e), [])
+
     def test_examples_match_contract_and_wrong_fields_are_not_silently_repaired(self):
         for example in ACTION_SHAPE_EXAMPLES:
             self.assertEqual(set(example),{'function',*ACTION_CATALOG[example['function']]['parameters']})
@@ -95,6 +112,16 @@ class PerformanceActionsTest(unittest.TestCase):
         for invalid in ([], [actions()[0]], [*plain, *plain]):
             with self.assertRaises(ValueError): validate_edge_actions(edge(), invalid)
 
+    def test_all_cut_actions_are_rejected(self):
+        native = {**edge(), 'mode':'clean_break', 'transition_bars':0}
+        for fade in (0, .5):
+            with self.assertRaisesRegex(ValueError, 'Cut transitions are disabled'):
+                validate_edge_actions(native, [{'function':'cut_to_next','start_beat':0,'fade_out_seconds':fade}])
+        late = [actions(120)[1]]
+        late[0]['curve'] = 'late_cut'
+        with self.assertRaises(ValueError):
+            validate_edge_actions(edge(120,120), late)
+
     def test_one_meta_call_decides_all_function_parameters(self):
         edges = [edge(), edge(140, 128, 240)]
         candidate = {"candidate_id": "routine-1", "transitions": edges, "action_planning": True}
@@ -107,7 +134,7 @@ class PerformanceActionsTest(unittest.TestCase):
             options=request['candidate_data'][0]['transitions'][0]['tempo_ramp_options']
             self.assertTrue(options)
             for option in options:
-                self.assertEqual(option['minimum_target_return_beats'],minimum_ramp_beats(option['common_bpm'],140))
+                self.assertEqual(option['minimum_target_return_beats'],minimum_ramp_beats(option['common_bpm'],140) if option['common_bpm'] != 140 else 0)
             self.assertNotIn('tempo_ramp_options',candidate['transitions'][0])
             return json.dumps({"selected_candidate_id": "routine-1", "intent": "maintain_energy", "transition_actions": expected,
                                "confidence": .8, "reason": "Gradual shared tempo with a measured low-EQ exchange."})
@@ -130,7 +157,7 @@ class PerformanceActionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "runway"):
             validate_edge_actions({**edge(), "earliest_source_action_beat": 120}, actions())
 
-    def build_plan(self, root, source_deck=1, in_track=None, clean=False):
+    def build_plan(self, root, source_deck=1, in_track=None):
         store=object.__new__(LiveStateStore)
         ids=("a"*64,"b"*64)
         store.queue={"revision": 1}
@@ -138,13 +165,6 @@ class PerformanceActionsTest(unittest.TestCase):
         plan=store._build_executable_plan(source_id=ids[0],target_id=ids[1],source_exit_beat=160,target_entry_beat=16,
              transition_bars=4,model="synthetic",source_deck=source_deck,target_deck=3-source_deck,plan_suffix="routine",use_bass_swap=False)
         compile_routine(plan,edge(),validate_edge_actions(edge(),actions()))
-        if clean:
-            plan = compile_clean_break_plan(source_id=ids[0], target_id=ids[1],
-                pair={'transition_mode':'clean_break','a_exit':{'beat_index':160},'b_entry':{'beat_index':16}},
-                catalog=store.analysis_catalog, queue_revision=1, source_deck=source_deck, target_deck=3-source_deck, model='test')
-            e={**edge(), 'mode':'clean_break', 'transition_bars':0}
-            a=[{'function':'cut_to_next','start_beat':0,'fade_out_seconds':.5}]
-            compile_routine(plan,e,validate_edge_actions(e,a))
         if in_track is not None:
             compile_in_track(plan, in_track)
         for t,bpm in zip(ids,(120,140)):
@@ -166,8 +186,8 @@ class PerformanceActionsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"does not match"):
                 transition.resolve_plan(root/"plan.json",root)
 
-    def execute_fake(self, root, *, source=1, takeover_at=None, cancel_at=None, missing_mapping=False, in_track=None, clean=False):
-        plan,resolved=self.build_plan(root,source,in_track,clean)
+    def execute_fake(self, root, *, source=1, takeover_at=None, cancel_at=None, missing_mapping=False, in_track=None):
+        plan,resolved=self.build_plan(root,source,in_track)
         target=3-source
         clock=[0.0];last=[0.0];calls=[]
         state={source:{"pos":resolved['deck_a_start_seconds'],"rate":1.0,"play":True,"bpm":120},target:{"pos":0.,"rate":1.,"play":False,"bpm":140}}
@@ -238,21 +258,20 @@ class PerformanceActionsTest(unittest.TestCase):
             self.assertGreater(state[1]["rate"],1.0)
             self.assertLess(state[1]["rate"],130/120)
 
-    def test_in_track_actions_execute_before_transition_on_both_decks_and_cut(self):
+    def test_in_track_actions_execute_before_transition_on_both_decks(self):
         for fn in ('bass_pulse','bass_reveal','volume_duck'):
             for source in (1,2):
-                for clean in (False,True):
-                    with self.subTest(fn=fn,source=source,clean=clean), TemporaryDirectory() as raw:
-                        action={'function':fn,'track_id':'a'*64,'start_beat':48,'duration_beats':16,'depth':.25}
-                        state,calls=self.execute_fake(Path(raw),source=source,in_track=[action],clean=clean)
-                        control,baseline=('volume',.75) if fn=='volume_duck' else ('bass',.5)
-                        shaping=[c for c in calls if c[:2]==(control,str(source)) and c[3] <= 12.1]
-                        self.assertTrue(any(c[2] < baseline-.05 for c in shaping))
-                        self.assertAlmostEqual(shaping[-1][2],baseline)
-                        self.assertTrue(state[3-source]['play'])
-                        self.assertFalse(state[source]['play'])
-                        log=next(Path(raw).glob('runs/*/transition-events.jsonl')).read_text()
-                        self.assertIn('in_track_action_completed',log)
+                with self.subTest(fn=fn,source=source), TemporaryDirectory() as raw:
+                    action={'function':fn,'track_id':'a'*64,'start_beat':48,'duration_beats':16,'depth':.25}
+                    state,calls=self.execute_fake(Path(raw),source=source,in_track=[action])
+                    control,baseline=('volume',.75) if fn=='volume_duck' else ('bass',.5)
+                    shaping=[c for c in calls if c[:2]==(control,str(source)) and c[3] <= 12.1]
+                    self.assertTrue(any(c[2] < baseline-.05 for c in shaping))
+                    self.assertAlmostEqual(shaping[-1][2],baseline)
+                    self.assertTrue(state[3-source]['play'])
+                    self.assertFalse(state[source]['play'])
+                    log=next(Path(raw).glob('runs/*/transition-events.jsonl')).read_text()
+                    self.assertIn('in_track_action_completed',log)
 
     def test_in_track_cancel_restores_control_but_takeover_writes_nothing(self):
         action={'function':'volume_duck','track_id':'a'*64,'start_beat':48,'duration_beats':16,'depth':.25}

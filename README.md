@@ -53,6 +53,24 @@ the operator reported successful E2E playback on November 3. A recorded audio
 acceptance run is still pending. Set preparation controls live in Agent flow;
 Control room focuses on the live decks, queue, plans, events and takeover.
 
+After an executor exits, deck rotation waits up to three seconds for Mixxx to
+confirm the incoming song is playing and the outgoing deck has stopped. It
+rechecks song identities and control ownership before loading. This avoids
+mistaking delayed MIDI feedback for a failed handoff. Waiting, completed,
+cancelled and failed attempts are tracked separately; takeover interrupts the
+wait. A webcam plan that fails before queue commit is shown as **Plan selected,
+but not applied**, with its reason retained. Synthetic delayed-feedback tests
+pass; an audible repeat of the operator's failing run remains to be verified.
+
+Initial automatic arming also waits for Mixxx to acknowledge source playback,
+within the existing four-second retry limit. A stopped snapshot can still favor
+the previous crossfader side; it must not abort Start as a live source change.
+The wait is bound to the reviewed plan and queue revision, and takeover or a
+changed song prevents arming. Initial arm acceptance, rejection, timeout and
+exceptions now appear in Events instead of being silently discarded. Synthetic
+tests reproduce delayed acknowledgement and check cancellation/replacement;
+the latest first-transition failure still needs a live repeat to confirm its cause.
+
 ### Restore a previously prepared playlist
 
 Step 2 now shows **Mount one playlist** and one authoritative **Mounted in this
@@ -295,8 +313,26 @@ the loopback-only service on port 8767. The panel works alongside either DJ
 simulation or the live bridge. Uploaded Analyze calls and active webcam cycles
 make real Meta requests. **Start webcam observation** captures six silent seconds
 per cycle; **Enable adaptive DJ** additionally requires `?source=live`, an active
-continuous set and Auto arm. It stages bounded future reorders/transition choices
-for the next completed handoff. Human takeover stays authoritative.
+continuous set and Auto arm. Explicit gestures stage future song reorders or in-track action changes
+for the next completed handoff; ordinary movement is recorded only. Human takeover stays authoritative.
+
+Webcam gesture requests share the rolling scheduler with ordinary window
+replenishment. Hold number 1 for at least two seconds to request a different
+remaining order; hold both arms overhead for more in-track effect, or crossed
+forearms for less. A held gesture triggers once; a clear released pose must be
+observed before repeating. Ordinary movement never requests a music change.
+In-track requests preserve song order. Meta may select no change; a transition-only
+change does not fulfill an in-track request and is not applied. The current
+routine stays locked, and future actions execute only at their scheduled beats.
+
+Gesture calls receive at most four fresh, current-set song/audience episodes.
+Ordinary rolling calls receive no audience memory. Earlier sets stay archived
+for review, not live preference retrieval. Memory lives in ignored
+`artifacts/live-performance/memory/events-v1.jsonl`; plan details expose the exact
+context supplied to Meta. The webcam panel separates observation, memory,
+decision and execution; confirmed in-track starts/completions come from executor
+journals. Visible movement is not inferred enjoyment or proof of music's effect.
+See [Crowd observation](docs/CROWD_OBSERVATION.md) for bounds and validation.
 
 Computer webcam → Muse observation was verified once. The full adaptive audio
 loop is implemented and covered by synthetic tests, but a real dance/Mixxx
@@ -584,3 +620,64 @@ The control architecture, music-analysis pipeline, constrained planning,
 Mixxx observer/executor integration, takeover behavior, and this product UI
 were developed during the hackathon. The public product integration is still
 in progress; claims will be updated only after runnable verification.
+
+November 3 observer regression: an automated target-tempo command's 250 ms
+attribution lease expired before the observer consumed its feedback about
+2.6 seconds later. Position queries returned full snapshots and every decoded
+field rebuilt the dashboard. The shared observer now coalesces telemetry-only
+callbacks at 20 Hz and delivers semantic events immediately. A synthetic burst
+regression verifies automatic attribution without suppressing a subsequent
+uncommanded tempo change. No MIDI mapping reload is required. The affected live
+run completed its webcam-selected Let's Go → Bass Addict handoff; its next
+routine was cancelled before handoff. A fresh audible run remains required.
+
+### Set run tracing
+
+Each accepted **Start playback** allocates a persistent `set-000001` style ID.
+A rejected validation does not allocate a number; a start that fails after
+allocation retains its number as `start_failed`. Recovery and deck rotation stay
+in the same run. The reviewed plan and initial order/request link are saved under
+`artifacts/live-performance/set-runs/<id>/`. Rebuilding a plan does not start a run.
+
+Webcam clips bind the run ID at capture start. Observations that finish after a
+new Start cannot affect that new run. The Webcam log selector defaults to the
+current run and offers previous runs, unassigned older/standalone observations,
+and all runs. Historical records are retained locally, not retroactively assigned
+to a guessed set. Earlier-set memory is archived for review and is not supplied to live Meta calls. The in-memory journal view is bounded (512 events;
+startup reads the last 2 MB); the full journal remains on disk.
+
+The same ID appears on camera job results, memory events, decisions, Meta call
+provenance (`meta-calls/<request>/set-run.json`), executor plans and execution
+events. The initial reviewed request predates Start and is linked by the run
+manifest. AI decisions include ordinary rolling calls as well as dedicated webcam
+requests, compare transition cues/parameters and show optional in-track opt-outs.
+Camera context in a request does not prove it caused a change. Each observation's
+DJ-feedback line reports whether feedback was queued, held or rejected. A retained
+plan is not an executed handoff; execution statuses refer to the first handoff.
+
+Run isolation/restart numbering, late observations, rolling execution attribution,
+job persistence and frontend filtering/diffs are covered by offline tests. Real
+camera + Mixxx playback with the new tracing still requires an operator run.
+
+AI decisions also shows in-flight, failed, timed-out and discarded planning
+attempts. Existing failed request IDs are joined read-only with saved request /
+response artifacts, including after a bridge restart. Unaccepted output is
+explicitly labeled and never compiled or replayed by the history viewer. Accepted
+calls retain their single decision/execution row. Trigger labels distinguish an
+explicit gesture from ordinary rolling replenishment carrying camera context.
+
+## Current transition policy
+
+The demo permits only `crossfade`, `bass_swap`, and `bass_dip`. Meta receives an
+explicit preference for audible, sustained blends and musically supported low-EQ
+shaping, preferably 4 or 8 bars when feasible. In-track actions remain optional.
+`clean_cut`, `fade_out_cut`, `late_cut`, and `cut_to_next` are disabled in candidate
+selection, model validation, and Start/Arm checks. Previously saved cut plans must
+be rebuilt; historical logs remain unchanged. A pair without a supported blend
+blocks planning instead of falling back to a cut. Product plans also disable the
+legacy sync-failure direct-cut fallback, preserving source playback on failure.
+
+Tempo examples supplied to Meta respect available source-ramp beats and target
+length, and include native BPM when valid. With zero pre-ramp runway, the prompt
+explicitly requires no source ramp or a different candidate. Full-window timing
+is still validated after the model responds.

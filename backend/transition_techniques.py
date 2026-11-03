@@ -22,26 +22,25 @@ TECHNIQUES = {
         "description": "Blend while removing outgoing bass from 25%-50%, then restoring incoming bass from 50%-75%.",
         "tradeoff": "Creates a deliberate bass-light midpoint then recovery; can reduce momentum.",
     },
-    "late_cut": {
-        "mode": "beat_sync_crossfade",
-        "description": "Start target in sync but inaudible; crossfade only over the final beat of the selected window.",
-        "tradeoff": "Short, decisive handoff with little audible overlap; target entry is a silent lead-in, not its audible drop. No drop is inferred.",
-    },
-    "clean_cut": {
-        "mode": "clean_break",
-        "description": "At source exit, start target at its cue, cut the fader, stop source. Keep native tempos.",
-        "tradeoff": "Works across tempo gaps without beat overlap; the speed and texture change can be abrupt.",
-    },
-    "fade_out_cut": {
-        "mode": "clean_break",
-        "description": "At source exit, fade source to silence over 0.5 seconds with target stopped, then start target at its cue. No beat overlap.",
-        "tradeoff": "Softens the outgoing end across tempo gaps; deliberately dips energy. Target starts 0.5 seconds after source exit.",
-    },
 }
 
 
 def technique_options(mode: str) -> list[str]:
     return [name for name, spec in TECHNIQUES.items() if spec["mode"] == mode]
+
+
+def validate_selection_policy(selection: dict) -> None:
+    """Reject saved direct cuts as well as new ones; never rewrite a reviewed plan."""
+    rows = [selection.get("next_executable_plan", {}), *selection.get("transition_buffer", [])]
+    for row in rows:
+        mix, routine = row.get("mix", {}), row.get("routine", {})
+        technique = mix.get("technique", row.get("technique", routine.get("technique")))
+        mode = row.get("transition_mode", row.get("mode"))
+        actions = [*row.get("performance_actions", []), *routine.get("actions", [])]
+        if (technique in {"clean_cut", "fade_out_cut", "late_cut"}
+                or mode == "clean_break" or mix.get("crossfader_curve") == "late_cut"
+                or any(a.get("function") == "cut_to_next" or a.get("curve") == "late_cut" for a in actions)):
+            raise ValueError("Cut transitions are disabled for this demo. Build a new performance plan using crossfade, bass swap or bass dip.")
 
 
 def apply_technique(plan: dict[str, Any], technique: str) -> dict[str, Any]:
@@ -53,11 +52,7 @@ def apply_technique(plan: dict[str, Any], technique: str) -> dict[str, Any]:
     mix.pop("bass_dip", None)
     mix.pop("fade_out_seconds", None)
     mix["technique"] = technique
-    if mode == "clean_break":
-        if technique == "fade_out_cut":
-            mix["fade_out_seconds"] = 0.5
-        return plan
-    mix["crossfader_curve"] = "late_cut" if technique == "late_cut" else "linear"
+    mix["crossfader_curve"] = "linear"
     beats = mix["beats"]
     if technique == "bass_swap":
         mix["bass_swap"] = {"start_beat": beats // 4, "end_beat": beats * 3 // 4}
@@ -78,6 +73,6 @@ def selected_techniques(decision: Any, edges: list[dict[str, Any]]) -> list[str]
     if len(selected) != len(edges):
         raise ValueError("one technique is required for every transition")
     for name, edge in zip(selected, edges):
-        if name not in edge.get("technique_options", technique_options(edge["mode"])):
+        if name not in technique_options(edge["mode"]) or name not in edge.get("technique_options", technique_options(edge["mode"])):
             raise ValueError("Meta selected an unavailable transition technique")
     return list(selected)

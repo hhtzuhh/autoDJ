@@ -1,14 +1,13 @@
 import {useEffect, useRef, useState} from "react";
+import {WebcamObservationLog} from "./WebcamObservationLog";
+import type {CameraJob, CaptureEntry} from "./webcamLog";
 import type {WebcamFlowState} from "./types";
+import {belongsToRun} from "./crowdChanges";
+import type {SetRun} from "./crowdChanges";
+import {MusicMemory} from "./MusicMemory";
+import {CrowdDecisionLog} from "./CrowdDecisionLog";
 
-type Decision = {reason: string; model: string; before: string[]; after: string[]; queueChanged: boolean;
-  lockedThrough: number; sourceTrack: string; targetTrack: string; technique: string; bassSwap: boolean; bars: number; planId: string; observationId: string; executionStatus?: string};
-type Adaptive = {enabled: boolean; status: string; reason: string; decision?: Decision; lastApplied?: Decision;
-  observation?: {summary: string; goal: string | null; source: string}};
-type CameraJob = {model?: string; modelSeconds?: number; requestedAt?: string; finishedAt?: string; id: string; status: string; stage: string; error?: string; remoteFileCleanup?: string;
-  observation?: {summary_en: string; quality: {visibility: string; camera_motion: string}; evidence: {
-    id: string; start_seconds: number; end_seconds: number; observation: string}[]};
-  cue?: {value: string}};
+type Adaptive = import("./crowdChanges").AdaptiveState;
 async function json<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {...options, signal: options?.signal ?? AbortSignal.timeout(15_000)});
   const data = await response.json().catch(() => null);
@@ -49,13 +48,17 @@ function record(stream: MediaStream, signal: AbortSignal): Promise<Blob> {
   });
 }
 
-export function CrowdWebcam({live, tracks, onTelemetry}: {live: boolean; tracks: {id: string; title: string}[]; onTelemetry?: (value: WebcamFlowState) => void}) {
+export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean; setRun?: SetRun | null; tracks: {id: string; title: string}[]; onTelemetry?: (value: WebcamFlowState) => void}) {
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [stage, setStage] = useState("Camera is off");
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<CameraJob | null>(null);
+  const [captures, setCaptures] = useState<CaptureEntry[]>([]);
   const [adaptive, setAdaptive] = useState<Adaptive | null>(null);
+  const [scope, setScope] = useState(setRun?.id ?? '');
+  const runRef = useRef(setRun?.id); runRef.current = setRun?.id;
+  useEffect(() => {setScope(setRun?.id ?? '');}, [setRun?.id]);
   const [changing, setChanging] = useState(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [device, setDevice] = useState("");
@@ -69,8 +72,26 @@ export function CrowdWebcam({live, tracks, onTelemetry}: {live: boolean; tracks:
   const liveRef = useRef(live); liveRef.current = live;
 
   useEffect(() => {
-    onTelemetry?.({running, starting, stage, error, job, adaptive});
-  }, [running, starting, stage, error, job, adaptive, onTelemetry]);
+    if (!live) return;
+    let active = true;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        const state = await json<Adaptive>("/api/adaptive/status", {signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)])});
+        if (active) setAdaptive(state);
+      } catch { /* Preserve the last known records on a temporary read failure. */ }
+      finally { if (active) timer = setTimeout(() => void refresh(), 2000); }
+    };
+    void refresh();
+    return () => {active = false; controller.abort(); clearTimeout(timer);};
+  }, [live]);
+
+  useEffect(() => {
+    onTelemetry?.({running, starting, stage, error, job, adaptive: adaptive ? {...adaptive,
+      decision: adaptive.decision && belongsToRun(adaptive.decision, setRun?.id ?? '') ? adaptive.decision : undefined,
+      lastApplied: adaptive.lastApplied && belongsToRun(adaptive.lastApplied, setRun?.id ?? '') ? adaptive.lastApplied : undefined} : null});
+  }, [running, starting, stage, error, job, adaptive, onTelemetry, setRun?.id]);
 
   function stop() {
     const wasActive = Boolean(controller.current || stream.current || session.current);
@@ -122,37 +143,60 @@ export function CrowdWebcam({live, tracks, onTelemetry}: {live: boolean; tracks:
     return () => clearInterval(timer);
   }, [running]);
 
+  function updateCapture(id: string, patch: Partial<CaptureEntry>) {
+    if (mounted.current) setCaptures(rows => rows.map(row => row.id === id ? {...row, ...patch} : row));
+  }
   async function captureLoop(media: MediaStream, signal: AbortSignal, id: string) {
     while (!signal.aborted) {
-      setStage("Recording 6 seconds · silent webcam");
       const capturedAt = new Date().toISOString();
-      const clip = await record(media, signal);
-      if (signal.aborted) return;
-      setStage("Sending webcam clip to Spark…");
-      const query = new URLSearchParams({mode: "webcam", session: id, capturedAt});
-      const accepted = await json<{id: string}>(`/api/crowd/analyze?${query}`, {
-        method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: clip, signal,
-      });
-      let result: CameraJob;
-      const deadline = Date.now() + 600_000;
-      do {
-        await delay(1200, signal);
-        result = await json<CameraJob>(`/api/crowd/jobs/${accepted.id}`, {signal});
-        setStage(result.stage); setJob(result);
-        if (Date.now() > deadline) throw new Error("Observation timed out. Stop and inspect the local service.");
-      } while (result.status === "running");
-      if (result.status !== "completed") throw new Error(result.error ?? "Observation failed. No automatic retry.");
-      if (result.remoteFileCleanup !== "deleted") throw new Error("Remote cleanup did not succeed. Capture stopped; inspect the local observation artifacts.");
-      if (enabled.current) {
-        try {
-          const state = await post<Adaptive>("observation", {jobId: accepted.id});
-          if (!signal.aborted) {setAdaptive(state); enabled.current = state.enabled;}
-        } catch (cause) {
-          if (signal.aborted || session.current !== id) return;
-          enabled.current = false; stopRemote(id);
-          setAdaptive(previous => previous ? {...previous, enabled: false, status: "off"} : null);
-          setError(cause instanceof Error ? cause.message : "Adaptive feedback rejected.");
+      const captureId = crypto.randomUUID();
+      const setRunId = runRef.current;
+      let acceptedId: string | undefined;
+      let uploading = false;
+      setCaptures(rows => [{id: captureId, setRunId, sessionId: id, capturedAt, phase: "recording"}, ...rows]);
+      try {
+        setStage("Recording 6 seconds · silent webcam");
+        const clip = await record(media, signal);
+        if (signal.aborted) throw new Error("Capture stopped before submission.");
+        uploading = true;
+        updateCapture(captureId, {phase: "uploading"});
+        setStage("Sending webcam clip to Spark…");
+        const query = new URLSearchParams({mode: "webcam", session: id, capturedAt});
+        if (setRunId) query.set("setRunId", setRunId);
+        const accepted = await json<{id: string}>(`/api/crowd/analyze?${query}`, {
+          method: "POST", headers: {"Content-Type": "application/octet-stream"}, body: clip, signal,
+        });
+        acceptedId = accepted.id;
+        updateCapture(captureId, {phase: "submitted", jobId: accepted.id});
+        let result: CameraJob;
+        const deadline = Date.now() + 600_000;
+        do {
+          await delay(1200, signal);
+          result = await json<CameraJob>(`/api/crowd/jobs/${accepted.id}`, {signal});
+          updateCapture(captureId, {job: result});
+          setStage(result.stage); setJob(result);
+          if (Date.now() > deadline) throw new Error("Observation timed out. Stop and inspect the local service.");
+        } while (result.status === "running");
+        if (result.status !== "completed") throw new Error(result.error ?? "Observation failed. No automatic retry.");
+        if (result.remoteFileCleanup !== "deleted") throw new Error("Remote cleanup did not succeed. Capture stopped; inspect the local observation artifacts.");
+        if (enabled.current) {
+          try {
+            const state = await post<Adaptive>("observation", {jobId: accepted.id});
+            if (!signal.aborted) {setAdaptive(state); enabled.current = state.enabled;}
+          } catch (cause) {
+            if (signal.aborted || session.current !== id) return;
+            enabled.current = false; stopRemote(id);
+            setAdaptive(previous => previous ? {...previous, enabled: false, status: "off"} : null);
+            setError(cause instanceof Error ? cause.message : "Adaptive feedback rejected.");
+          }
         }
+      } catch (cause) {
+        updateCapture(captureId, {phase: acceptedId ? "submitted" : signal.aborted ? "stopped" : "failed",
+          note: acceptedId ? "Camera loop stopped. The log continues checking the submitted observation."
+            : signal.aborted ? uploading ? "Upload interrupted; server acceptance is not yet confirmed." : "Stopped before upload. No Meta call was sent."
+            : cause instanceof Error ? cause.message : "Capture failed."});
+        if (signal.aborted) return;
+        throw cause;
       }
       setStage("Observation complete · next capture in 5 seconds");
       await delay(5000, signal);
@@ -195,13 +239,18 @@ export function CrowdWebcam({live, tracks, onTelemetry}: {live: boolean; tracks:
     } catch (cause) {setError(cause instanceof Error ? cause.message : "Could not change adaptive mode.");}
     finally {setChanging(false);}
   }
-  const decision = adaptive?.decision;
-  const applied = adaptive?.lastApplied;
-  const title = (id: string) => tracks.find(t => t.id === id)?.title ?? id.slice(0, 8);
+  const runOptions = [...(adaptive?.setRuns ?? [])];
+  if (setRun && !runOptions.some(run => run.id === setRun.id)) runOptions.push(setRun);
+  const memoryRows = (adaptive?.memory?.history ?? adaptive?.memory?.recent ?? []).filter(row => belongsToRun(row, scope));
+  const scopedAdaptive = adaptive ? {...adaptive,
+    planningAttempts: adaptive.planningAttempts?.filter(row => belongsToRun(row, scope)),
+    decisionHistory: adaptive.decisionHistory?.filter(row => belongsToRun(row, scope)),
+    decision: adaptive.decision && belongsToRun(adaptive.decision, scope) ? adaptive.decision : undefined,
+    lastApplied: adaptive.lastApplied && belongsToRun(adaptive.lastApplied, scope) ? adaptive.lastApplied : undefined} : null;
   return <section className="panel crowd-panel" aria-labelledby="webcam-title">
     <div className="panel__header"><div><span className="eyebrow">Meta vision → DJ planning</span><h2 id="webcam-title">Crowd adaptive · Webcam</h2></div>
       <span className="crowd-badge">{adaptive?.enabled ? "Adaptive DJ on" : "Observation mode"}</span></div>
-    <p className="crowd-intro">Aim your computer camera at the dancers, including a solo performer. Spark observes short clips; enable adaptive DJ to shape future track order and transitions.</p>
+    <p className="crowd-intro">Spark observes visible audience movement. Enable adaptive DJ to save song-linked observations and use explicit gestures to request a new song order or future in-track actions.</p>
     <div className="crowd-controls">
       <label>Camera<select value={device} disabled={running || starting} onChange={e => setDevice(e.target.value)}>
         <option value="">Default computer camera</option>{devices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || "Camera"}</option>)}</select></label>
@@ -212,23 +261,23 @@ export function CrowdWebcam({live, tracks, onTelemetry}: {live: boolean; tracks:
     <div className="crowd-content">
       <div className="crowd-preview"><video ref={preview} muted playsInline aria-label="Live webcam preview" className="crowd-webcam-preview" />
         <p className="crowd-note" role="status">{stage}</p>
-        <p className="crowd-note"><strong>Demo gestures:</strong> both arms overhead for 2+ seconds = build; forearms crossed in an X at the chest for 2+ seconds = ease. Conflicting or unclear cues keep the existing direction.</p>
+        <p className="crowd-note"><strong>Demo gestures:</strong> hold one upright index finger (number 1) for 2+ seconds to request a different remaining song order. Hold both arms above your head for 2+ seconds to request an in-track effect; cross your forearms in an X for fewer effects. Lower your hands for an observed clip before repeating. Ordinary dancing or stillness is recorded only. Meta may keep actions unchanged if no suitable slot exists.</p>
       </div>
       <div className="crowd-results">
-        <article className="crowd-region"><h3>1 · Observed</h3><p>{job?.observation?.summary_en ?? "Waiting for a webcam observation."}</p>
-          {job?.cue && <p className="crowd-note">Gesture: {job.cue.value} · visibility: {job.observation?.quality.visibility}</p>}
-          {job?.observation && <details><summary>Timestamped evidence and raw observation</summary><ul>{job.observation.evidence.map(e => <li key={e.id}>{e.start_seconds}–{e.end_seconds}s: {e.observation}</li>)}</ul>
-            <video controls muted playsInline src={`/api/crowd/jobs/${job.id}/clip`} aria-label="Latest analyzed webcam clip" />
-            <pre>{JSON.stringify(job, null, 2)}</pre></details>}
-        </article>
-        <article className="crowd-region"><h3>2 · Decision · {adaptive?.status ?? "off"}</h3><p>{adaptive?.reason ?? "Enable adaptive DJ after starting the live set. Webcam observation alone does not change playback."}</p>
-          {decision && <><p>{decision.reason}</p><p className="crowd-note">{decision.model} · {decision.technique.replaceAll("_", " ")} · {decision.bars} bars · bass swap {decision.bassSwap ? "on" : "off"}</p>
-            {decision.queueChanged && <p className="crowd-note">Before: {decision.before.slice(decision.lockedThrough + 1, decision.lockedThrough + 4).map(title).join(" → ")}</p>}
-            <p className="crowd-note">{decision.queueChanged ? "Proposed next tracks" : "Next tracks retained"}: {decision.after.slice(decision.lockedThrough + 1, decision.lockedThrough + 4).map(title).join(" → ")}</p></>}
-        </article>
-        <article className="crowd-region"><h3>3 · Execution</h3><p>{applied ? `${applied.executionStatus?.replaceAll("_", " ") ?? "Queue committed; waiting for deck load"} · ${title(applied.sourceTrack)} → ${title(applied.targetTrack)}` : "No crowd-driven change applied."}</p>
-          {applied && <details><summary>Decision record</summary><pre>{JSON.stringify(applied, null, 2)}</pre></details>}</article>
-        <p className="crowd-note">Natural movement needs two consistent observations. This demo policy follows visible intensity; it does not infer enjoyment. Changes wait for the current transition to finish and must still be fresh. Human takeover always takes priority.</p>
+        <label className="set-run-selector">Set run · logs
+          <select value={scope} onChange={e => setScope(e.target.value)}>
+            {[...runOptions].reverse().map(run => <option key={run.id} value={run.id}>
+              Set #{String(run.number).padStart(6, '0')} · {new Date(run.startedAt).toLocaleString('en-GB')}{run.id === setRun?.id ? ' · current' : ''}
+            </option>)}
+            <option value="">Unassigned · standalone / older logs</option>
+            <option value="all">All runs</option>
+          </select>
+        </label>
+        <WebcamObservationLog captures={captures} scope={scope} feedback={memoryRows} />
+        <MusicMemory episodes={(adaptive?.memory?.episodes ?? []).filter(row => belongsToRun(row, scope))}
+          events={memoryRows} tracks={tracks} warning={adaptive?.memory?.warning} />
+        <CrowdDecisionLog adaptive={scopedAdaptive} tracks={tracks} />
+        <p className="crowd-note">One request per held gesture. Reordering needs two unlocked songs. Changes apply after the current routine, then in-track actions wait for their scheduled song beat. The current handoff stays locked. Earlier sets remain archived and do not drive this demo. Human takeover always takes priority.</p>
       </div>
     </div>
     {error && <p className="crowd-warning" role="alert">{error}</p>}

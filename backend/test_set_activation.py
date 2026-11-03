@@ -146,6 +146,9 @@ class SetActivationTest(unittest.TestCase):
             )
 
             self.assertEqual(plan["transition_mode"], "clean_break")
+            self.assertEqual(plan["mix"]["technique"], "fade_out_cut")
+            self.assertEqual(plan["mix"]["fade_out_seconds"], .5)
+            self.assertFalse(plan["allow_clean_cut"])
             self.assertEqual(plan["mix"]["tempo_source"], "native_file_bpm_no_sync")
             self.assertNotIn("crossfader_curve", plan["mix"])
             self.assertNotIn("transition_end_beat_index", plan["deck_a"])

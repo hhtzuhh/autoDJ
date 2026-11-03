@@ -6,15 +6,16 @@ import io
 import json
 from pathlib import Path
 import sys
+import threading
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from live_bridge import LiveStateStore
 from meta_planner import MetaDecision, MetaSelection, build_transition_window_candidates, select_with_meta
 from test_meta_planner import pair
-from transition_techniques import TECHNIQUES, apply_technique
+from transition_techniques import TECHNIQUES, apply_technique, selected_techniques, validate_selection_policy
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "experiments/time-map"))
 import transition
@@ -61,14 +62,14 @@ class TransitionTechniquesTest(unittest.TestCase):
             self.assertFalse(request["track_context"]["a"]["verified"])
             self.assertIn("EVERY edge", system)
             return json.dumps({"selected_candidate_id": candidates[0]["candidate_id"], "intent": "maintain_energy",
-                "transition_techniques": ["crossfade", "bass_dip", "late_cut"], "confidence": .8, "reason": "Measured alternatives."})
+                "transition_techniques": ["crossfade", "bass_dip", "bass_swap"], "confidence": .8, "reason": "Measured alternatives."})
         selected = select_with_meta(candidates, queue_revision=2, intent="maintain_energy", track_ids=tuple("abcd"),
                       model="synthetic", transport=transport, track_context={"a": {"verified": False}})
-        self.assertEqual(selected.decision.transition_techniques, ("crossfade", "bass_dip", "late_cut"))
+        self.assertEqual(selected.decision.transition_techniques, ("crossfade", "bass_dip", "bass_swap"))
 
     def test_missing_wrong_count_unknown_or_incompatible_technique_rejected(self):
-        candidates = build_transition_window_candidates(({"clean_break_pairs": [cut_pair()]},))
-        for choices in ([], ["clean_cut", "clean_cut"], ["bass_swap"], ["echo_out"], None):
+        candidates = build_transition_window_candidates(({"pairs": [pair(1, 80, 20, .8)]},))
+        for choices in ([], ["clean_cut"], ["clean_cut", "clean_cut"], ["late_cut"], ["fade_out_cut"], ["echo_out"], None):
             payload = {"selected_candidate_id": candidates[0]["candidate_id"], "intent": "maintain_energy",
                        "confidence": .8, "reason": "synthetic"}
             payload.update({"use_bass_swap": False} if choices is None else {"transition_techniques": choices})
@@ -79,12 +80,12 @@ class TransitionTechniquesTest(unittest.TestCase):
     def test_mode_choices_survive_candidate_cap(self):
         mixed = {"pairs": [pair(1, 80, 20, .99)], "clean_break_pairs": [cut_pair()]}
         candidates = build_transition_window_candidates((mixed, mixed, mixed))
-        self.assertEqual(len({tuple(e["mode"] for e in row["transitions"]) for row in candidates}), 8)
+        self.assertEqual(len({tuple(e["mode"] for e in row["transitions"]) for row in candidates}), 1)
         self.assertLessEqual(len(candidates), 10)
 
     def test_compiler_preserves_all_three_independent_techniques_and_promotes(self):
-        compiled = self.compiled(["late_cut", "bass_swap", "bass_dip"])
-        self.assertEqual([edge["technique"] for edge in compiled["transition_buffer"]], ["late_cut", "bass_swap", "bass_dip"])
+        compiled = self.compiled(["crossfade", "bass_swap", "bass_dip"])
+        self.assertEqual([edge["technique"] for edge in compiled["transition_buffer"]], ["crossfade", "bass_swap", "bass_dip"])
         self.store.selection = compiled
         self.store.raw_performance = SimpleNamespace(decks={
             2: SimpleNamespace(track_id=self.ids[1], beat_index=30),
@@ -103,7 +104,7 @@ class TransitionTechniquesTest(unittest.TestCase):
         self.assertEqual(self.store.selection["following_feasible_draft"]["technique"], "bass_dip")
 
     def test_control_shapes_are_distinct_and_bounded(self):
-        for name in ("crossfade", "bass_swap", "bass_dip", "late_cut"):
+        for name in ("crossfade", "bass_swap", "bass_dip"):
             mix = self.compiled([name])["next_executable_plan"]["mix"]
             points = transition.mix_progress_points(mix)
             self.assertEqual((points[0], points[-1]), (0, 1))
@@ -113,9 +114,6 @@ class TransitionTechniquesTest(unittest.TestCase):
                 self.assertEqual((middle["source_bass"], middle["target_bass"]), (0, 0))
             elif name == "bass_swap":
                 self.assertEqual((middle["source_bass"], middle["target_bass"]), (.25, .25))
-            elif name == "late_cut":
-                self.assertEqual(middle["crossfader"], 0)
-                self.assertGreaterEqual(sum(p >= 1 - 1 / mix["beats"] for p in points), 9)
             else:
                 self.assertEqual(middle, {"crossfader": .5})
         invalid = self.compiled(["bass_dip"])["next_executable_plan"]["mix"]
@@ -163,27 +161,63 @@ class TransitionTechniquesTest(unittest.TestCase):
                     self.assertIn((str(source), "play", 0.0), calls)
                     self.assertNotIn((target, "play", 0.0), calls)
                     self.assertEqual(calls[-1], ("master", "crossfader", 1.0 if source == 1 else 0.0))
-                    if name == "fade_out_cut":
-                        start = calls.index((target, "play", 1.0))
-                        self.assertGreaterEqual(sum(row[:2] == ("master", "crossfader") for row in calls[:start]), 17)
-                        self.assertAlmostEqual(waits[-1] - waits[0], .5)
 
     def test_takeover_during_new_techniques_sends_no_cleanup_controls(self):
-        for name in ("bass_dip", "late_cut", "fade_out_cut"):
+        for name in ("crossfade", "bass_swap", "bass_dip"):
             calls, _ = self.run_executor(name, interrupt=transition.TransitionTakenOver)
             self.assertEqual(calls[-1], ("interrupted",))
 
-    def test_cancel_during_fade_out_keeps_source_playing(self):
-        calls, _ = self.run_executor("fade_out_cut", interrupt=transition.TransitionCancelled)
-        self.assertIn(("1", "play", 1.0), calls)
-        self.assertNotIn(("1", "play", 0.0), calls)
-        self.assertNotIn(("2", "play", 1.0), calls)
+    def test_cut_only_candidates_are_unavailable(self):
+        self.assertEqual(build_transition_window_candidates(({'clean_break_pairs':[cut_pair()]},)), [])
+        for name in ('clean_cut', 'fade_out_cut', 'late_cut'):
+            with self.assertRaises(ValueError):
+                apply_technique({'transition_mode':'clean_break','mix':{}}, name)
 
-    def test_sync_fallback_restores_incoming_bass_before_cut(self):
-        calls, _ = self.run_executor("bass_dip", fail_sync=True)
-        start = calls.index(("2", "play", 1.0))
-        target_eq = [row[2] for row in calls[:start] if row[:2] == ("2", "bass")]
-        self.assertEqual(target_eq[-1], .5)
+    def test_sync_failure_cannot_fall_back_to_a_direct_cut(self):
+        with self.assertRaisesRegex(RuntimeError, 'clean-cut fallback is disabled'):
+            self.run_executor("bass_dip", fail_sync=True)
+        events = [json.loads(line) for path in (self.root / 'runs').glob('*/transition-events.jsonl') for line in path.read_text().splitlines()]
+        self.assertIn('runtime_clean_cut_blocked', [e['event'] for e in events])
+        self.assertNotIn('runtime_clean_break_completed', [e['event'] for e in events])
+        self.assertIn('failed_live_transition_cleanup', [e['event'] for e in events])
+
+    def test_cached_technique_options_cannot_reenable_clean_cut(self):
+        self.assertNotIn('clean_cut', TECHNIQUES)
+        edge = {'mode':'clean_break', 'technique_options':['clean_cut','fade_out_cut']}
+        with self.assertRaises(ValueError):
+            selected_techniques(SimpleNamespace(transition_techniques=['clean_cut']), [edge])
+        with self.assertRaises(ValueError):
+            selected_techniques(SimpleNamespace(), [edge])
+
+    def test_saved_direct_cuts_block_start_and_arm_policy_without_rewriting(self):
+        for plan in ({'transition_mode':'clean_break','mix':{}},
+                     {'transition_mode':'clean_break','mix':{'technique':'clean_cut'}},
+                     {'transition_mode':'clean_break','mix':{'technique':'fade_out_cut','fade_out_seconds':.5}},
+                     {'mix':{'technique':'late_cut','crossfader_curve':'late_cut'}},
+                     {'performance_actions':[{'function':'cut_to_next','fade_out_seconds':0}]}):
+            with self.subTest(plan=plan), self.assertRaisesRegex(ValueError, 'Cut transitions are disabled'):
+                validate_selection_policy({'next_executable_plan':plan})
+        with self.assertRaises(ValueError):
+            validate_selection_policy({'transition_buffer':[{'mode':'clean_break','technique':'clean_cut'}]})
+        validate_selection_policy(self.compiled(['bass_swap']))
+
+    def test_start_and_arm_reject_old_direct_cut_before_midi_or_executor(self):
+        s = self.store
+        s.selection = {'next_executable_plan':{'transition_mode':'clean_break','mix':{'technique':'clean_cut'}}}
+        s.action_lock = threading.RLock()
+        s._executor_running = lambda: False
+        s.activation_in_progress = False
+        s.prepared_performance = {'selection':s.selection}
+        s._activation_snapshot = Mock(side_effect=AssertionError('must reject before activation'))
+        status, result = s.request_start_set()
+        self.assertEqual(status, 409)
+        self.assertIn('Cut transitions are disabled', result['message'])
+        s.prepared_performance = None
+        s.envelope = None
+        s.raw_performance = SimpleNamespace()
+        s._recovery_reason = lambda: None
+        status, result = s.request_arm()
+        self.assertEqual((status,result['error']), (409,'cut_transitions_disabled'))
 
 
 if __name__ == "__main__": unittest.main()

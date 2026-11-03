@@ -578,6 +578,7 @@ class MetaPlannerTest(unittest.TestCase):
 
     def test_auto_arm_retries_until_target_transport_is_observed(self) -> None:
         store = object.__new__(LiveStateStore)
+        store.action_lock = threading.RLock()
         store.auto_arm_enabled = True
         store.auto_chain_cancel = threading.Event()
         responses = iter(
