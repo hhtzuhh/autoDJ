@@ -36,6 +36,18 @@ class CuratorBudgetTest(unittest.TestCase):
         self.assertEqual([c['status'] for c in self.service.state['curatorCalls']], ['truncated', 'completed'])
         self.assertNotIn('private-synthetic-key', json.dumps(self.service.snapshot()))
 
+    def test_chinese_reorder_request_keeps_english_response_instruction(self):
+        with patch('set_builder.OpenAICompatibleTransport') as transport:
+            transport.return_value.return_value = self.response
+            ordered, reason = self.service._meta_curator(self.tracks, '請幫我重排，輕鬆一點', 3)
+        system, user = transport.return_value.call_args.args
+        request = json.loads(user)
+        self.assertIn('Write reason in English only', system)
+        self.assertEqual(request['output_language'], 'English')
+        self.assertEqual(request['request'], '請幫我重排，輕鬆一點')
+        self.assertEqual(ordered, self.ids)
+        self.assertEqual(reason, 'Measured continuity.')
+
     def test_second_truncation_and_other_errors_do_not_loop_or_accept_partial_plan(self):
         for error, expected_calls in [(MetaOutputLimitError('truncated'), 2), (TimeoutError('timeout'), 1),
                                       (RuntimeError('HTTP 429'), 1)]:

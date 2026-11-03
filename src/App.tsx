@@ -764,7 +764,7 @@ function App() {
     });
   };
 
-  const sendLiveAction = async (action: "plan" | "arm" | "takeover" | "recover") => {
+  const sendLiveAction = async (action: "arm" | "takeover" | "recover") => {
     setActionPending(true);
     setActionNotice(null);
     try {
@@ -999,11 +999,11 @@ function App() {
 
       <footer className="control-dock">
         <div className="control-dock__context">
-          <span>{state.dataSource === "live" ? "Live observer" : "Demo controls"}</span>
+          <span>{state.dataSource === "live" ? "Live controls" : "Demo controls"}</span>
           <p>
             {state.dataSource === "live"
               ? state.autoArmEnabled
-                ? "The target is three future-ready transitions. Ready transitions auto-arm after deck rotation."
+                ? "Prepare your set in Agent flow. Take over here during playback."
                 : "Automation is suspended. Start a reviewed set or recover before resuming Auto arm."
               : "DJ controls are simulated. Crowd observation uses real Meta requests for uploads and while webcam capture is on. Adaptive DJ requires Live Mixxx."}
           </p>
@@ -1035,24 +1035,11 @@ function App() {
         ) : (
           <div className="control-dock__actions">
             <button
-              className="button button--ghost"
-              onClick={() => { window.location.href = "/"; }}
-            >
-              Open simulation
-            </button>
-            <button
               className={`button ${state.autoArmEnabled ? "button--toggle-on" : "button--ghost"}`}
               disabled={actionPending || state.autoArmEnabled}
               onClick={() => void setAutoArm(true)}
             >
               {state.autoArmEnabled ? "Auto arm · Always on" : "Resume Auto arm"}
-            </button>
-            <button
-              className="button button--secondary"
-              disabled={actionPending || state.queue.length < 2 || state.plan.status === "executing"}
-              onClick={() => void sendLiveAction("plan")}
-            >
-              <Icon name="spark" /> Plan with Meta
             </button>
             <button
               className="button button--primary"

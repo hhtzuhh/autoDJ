@@ -453,6 +453,14 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .in-track-actions ul { list-style: none; padding: 0; display: grid; gap: 12px; }
 .in-track-actions li { display: grid; gap: 5px; font-size: 12px; }
 .in-track-actions li span, .in-track-actions li small { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.mounted-playlist { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-strong); }
+.mounted-playlist--ready { border-color: rgba(107,231,174,.3); }
+.mounted-playlist--ready > strong { color: var(--green); }
+.mounted-playlist__filename { overflow-wrap: anywhere; color: var(--text); font: 12px "DM Mono", monospace; }
+.mounted-playlist__mixxx { border-top: 1px solid var(--line); padding-top: 12px; }
+.mounted-playlist ol { margin: 10px 0; padding-left: 20px; }
+.mounted-playlist ol > li { margin: 4px 0; padding: 0; }
+.playlist-source-options { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 10px; }
 @media (max-width: 600px) {
   .transition-catalog__techniques { grid-template-columns: 1fr; }
   .performance-timeline li { grid-template-columns: minmax(0,1fr) auto; gap: 6px 10px; }

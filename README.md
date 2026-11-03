@@ -55,9 +55,17 @@ Control room focuses on the live decks, queue, plans, events and takeover.
 
 ### Restore a previously prepared playlist
 
-In **Prepare & start your set → Step 2: Export or import a prepared playlist**,
+Step 2 now shows **Mount one playlist** and one authoritative **Mounted in this
+app** card with the export filename, source, count and expandable song order.
+Export mounts the current selection; importing replaces it. Choosing an import
+file only previews it until **Import & mount this playlist** is confirmed. A new
+build, order revision or export clears old import previews and result notices.
+App mounting does not select a playlist inside Mixxx: open the displayed file
+there and select its first song; Build performance plan checks the staged songs.
+
+In **Prepare & start your set → Step 2: Mount one playlist → Import another playlist**,
 choose an earlier UTF-8 `.m3u8` / `.m3u`. Preview matches songs against the fixed
-local library. **Import playlist & restore transitions** restores the order,
+local library. **Import & mount this playlist** restores the order,
 validates/reuses each adjacent pair cache, and recreates the prepared activation.
 Step 3 **Build performance plan** then becomes available without manually running
 Step 1 or exporting again. Meta is first called in Step 3; import never plays audio.

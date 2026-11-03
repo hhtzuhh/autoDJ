@@ -259,6 +259,8 @@ export interface CopilotState {
       queueRevision: number;
       trackCount: number;
       playlist: string;
+      builderRevision?: number;
+      orderedTrackIds?: string[];
     } | null;
   };
 }

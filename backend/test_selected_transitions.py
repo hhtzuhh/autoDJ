@@ -210,7 +210,11 @@ class SelectedTransitionsTest(unittest.TestCase):
     def test_new_preparation_invalidates_old_export_even_with_same_song_order(self):
         with TemporaryDirectory() as raw:
             store=self.start_store(Path(raw),meta_ok=True)
-            self.assertIsNotNone(store._activation_snapshot())
+            mounted=store._activation_snapshot()
+            self.assertIsNotNone(mounted)
+            builder=store.set_builder.snapshot()
+            self.assertEqual(mounted['builderRevision'],builder['queueRevision'])
+            self.assertEqual(mounted['orderedTrackIds'],builder['orderedTrackIds'])
             store.set_builder.prepare_selected_transitions();wait(store.set_builder)
             self.assertIsNone(store._activation_snapshot())
             status,payload=store.request_build_performance_plan()

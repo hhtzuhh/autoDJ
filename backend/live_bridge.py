@@ -304,6 +304,8 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "queueRevision": int(queue["revision"]),
                 "trackCount": len(queue["ordered_track_ids"]),
                 "playlist": str(payload["playlist_path"]),
+                "builderRevision": int(payload["builder_revision"]),
+                "orderedTrackIds": list(queue["ordered_track_ids"]),
             }
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None

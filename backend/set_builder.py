@@ -40,6 +40,10 @@ ordered_track_ids and reason. ordered_track_ids must contain unique IDs.
 Use track_count as the exact requested count; request prose may contain an old
 count. Keep reason to one concise sentence, at most 500 characters. Prefer a
 simple feasible ordering; do not enumerate permutations or write an essay.
+Write reason in English only, regardless of the language of the user's request
+or catalog metadata. Understand requests in any language, but do not mirror their
+language in the response. Describe the selection in English without translating
+or changing supplied track IDs.
 Every catalog track has been analyzed before this request. Use analysisSummary
 for measured evidence. The genre field comes from file tags. musicFeatures, when
 present, contains unverified Muse audio descriptions (genre, groove, instruments,
@@ -216,6 +220,7 @@ def curate_with_meta(
         {
             "task": "curate_local_dj_set",
             "request": prompt,
+            "output_language": "English",
             "track_count": count,
             "catalog": [track.public() for track in candidates],
             "required_output_fields": ["ordered_track_ids", "reason"],

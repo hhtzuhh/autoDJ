@@ -4,6 +4,7 @@ import type {BuildResult} from "./playlistRequest";
 import {PreparedPlaylistImport} from "./PreparedPlaylistImport";
 import {InTrackActions, inTrackLabels} from "./InTrackActions";
 import type {InTrackAction} from "./types";
+import {preparedPlaylistView} from "./preparedPlaylist";
 
 export function TransitionSetupDialog({open, onClose, state, disabled, onAction}: {
   open: boolean; onClose: () => void; state: CopilotState; disabled: boolean;
@@ -14,10 +15,17 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const b = state.dataSource === "live" ? state.setBuilder : undefined;
+  const mountedPlaylist = preparedPlaylistView(b);
+  const [playlistMode, setPlaylistMode] = useState<"selection" | "import">("selection");
+  const context = useRef(mountedPlaylist.contextKey);
+  context.current = mountedPlaylist.contextKey;
+  useEffect(() => {
+    setPlaylistMode("selection"); setNotice(null); setError(null);
+  }, [mountedPlaylist.contextKey]);
   const preparing = ["curating", "analyzing", "planning"].includes(b?.status ?? "");
   const locked = disabled || busy || preparing || !state.connected || !b;
   const playing = state.decks.some(d => d.playing);
-  const exported = Boolean(b?.activationReady && b.activation?.status === "playlist_ready");
+  const exported = mountedPlaylist.mounted;
   const performance = b?.performancePlan;
   useEffect(() => {
     if (open && !dialog.current?.open) dialog.current?.showModal();
@@ -25,12 +33,14 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
   }, [open]);
   const run = async (action: "prepare-transitions" | "activate" | "build-performance" | "start") => {
     if (locked) return;
+    const startedContext = context.current;
     setBusy(true); setError(null); setNotice(null);
     try {
       const result = await onAction(action);
+      if (context.current !== startedContext) return;
       if (!result.ok) setError(result.error ?? "Action rejected");
-      else setNotice(result.message ?? "Action accepted");
-    } catch (error) {setError(String(error));}
+      else if (action !== "activate") setNotice(result.message ?? "Action accepted");
+    } catch (error) {if (context.current === startedContext) setError(String(error));}
     finally {setBusy(false);}
   };
   const title = (id: string) => b?.queue.find(t => t.id === id)?.title ?? id.slice(0, 8);
@@ -72,10 +82,27 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
     <ol className="set-setup-steps">
       <li><strong>Prepare adjacent transitions</strong><p>Reuse local analysis and pair caches for each neighboring song. This does not call Meta or start playback.</p>
         <button className="button button--secondary" disabled={locked || (b?.queue.length ?? 0) < 2} onClick={() => void run("prepare-transitions")}>{preparing && b?.buildPhase === "transitions" ? "Preparing candidates…" : "Prepare transitions"}</button></li>
-      <li><strong>Export or import a prepared playlist</strong><p>For a new set, export after Step 1. If you already have a prepared playlist, import it below to restore the order and transitions, then go straight to Step 3. In Mixxx, open the playlist and select its first song.</p>
-        <button className="button button--secondary" disabled={locked || !b?.activationReady || playing} onClick={() => void run("activate")}>Export Mixxx playlist</button>
-        {exported && <code className="set-setup-path">{b?.activation?.playlist}</code>}
-        <PreparedPlaylistImport disabled={disabled || preparing || !state.connected || !b || playing} busy={busy} onBusy={setBusy} />
+      <li><strong>Mount one playlist</strong><p>The app uses one prepared playlist at a time. Export mounts the current selection; import replaces it with the imported song order.</p>
+        <div className={`mounted-playlist ${exported ? "mounted-playlist--ready" : ""}`} aria-label="Currently mounted playlist">
+          <strong>{exported ? `Mounted in this app · ${mountedPlaylist.tracks.length} songs` : "No playlist mounted for this selection"}</strong>
+          {exported ? <>
+            <p className="mounted-playlist__filename">{mountedPlaylist.filename}</p>
+            <p>{mountedPlaylist.source}</p>
+            <details className="panel-details"><summary>View mounted song order ({mountedPlaylist.tracks.length})</summary>
+              <ol>{mountedPlaylist.tracks.map(t => <li key={t.id}>{t.title}</li>)}</ol>
+            </details>
+            <details className="panel-details"><summary>Playlist file path</summary><code className="set-setup-path">{mountedPlaylist.path}</code></details>
+            <p className="mounted-playlist__mixxx"><strong>Mixxx setup</strong><br />Open this playlist in Mixxx and click its first song, “{mountedPlaylist.tracks[0]?.title}”. App mounting does not select a playlist in Mixxx; Step 3 checks the staged songs.</p>
+          </> : <p>{b?.queue.length ?? 0} songs currently selected. Prepare their transitions, then export and mount them, or import another playlist below.</p>}
+        </div>
+        <div className="playlist-source-options" role="group" aria-label="Choose playlist source">
+          <button type="button" className={`button ${playlistMode === "selection" ? "button--secondary" : "button--ghost"}`} aria-pressed={playlistMode === "selection"} disabled={busy} onClick={() => setPlaylistMode("selection")}>Use current selection ({b?.queue.length ?? 0})</button>
+          <button type="button" className={`button ${playlistMode === "import" ? "button--secondary" : "button--ghost"}`} aria-pressed={playlistMode === "import"} disabled={busy} onClick={() => setPlaylistMode("import")}>Import another playlist</button>
+        </div>
+        {playlistMode === "selection" ? <>
+          <p>{exported ? "The playlist above is mounted. Export again only if you need a new file." : "Export the selected order to an M3U8 file and mount it for Step 3."}</p>
+          <button className="button button--secondary" disabled={locked || !b?.activationReady || playing} onClick={() => void run("activate")}>{exported ? "Re-export & mount current selection" : "Export & mount current selection"}</button>
+        </> : <PreparedPlaylistImport key={mountedPlaylist.contextKey} disabled={disabled || preparing || !state.connected || !b || playing} busy={busy} onBusy={setBusy} mountedCount={exported ? mountedPlaylist.tracks.length : 0} onImported={() => setPlaylistMode("selection")} />}
       </li>
       <li><strong>Build performance plan</strong><p>First, manually import/open the exported M3U8 in Mixxx, keep its original playlist order, and click its first song in the track table. Web import does not select a playlist in Mixxx. With both decks stopped, Build loads and verifies those songs, then asks Meta to choose cues, actions and parameters for the first window. This does not start playback.</p>
         <button className="button button--secondary" disabled={locked || !exported || playing || performance?.status === "building"} onClick={() => void run("build-performance")}>{performance?.status === "building" ? "Building performance plan…" : "Build performance plan"}</button>
