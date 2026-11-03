@@ -220,9 +220,10 @@ function TrackMini({ track }: { track: Track }) {
   );
 }
 
-function PlanDetails({ plan }: { plan: Partial<Pick<TransitionPlan,
-  "technique" | "sourceCueBeat" | "sourceExitBeat" | "targetEntryBeat" | "transitionMode" | "bars" | "confidence" | "performanceActions" | "inTrackActions">> }) {
+function PlanDetails({ plan, queueView = false }: { plan: Partial<Pick<TransitionPlan,
+  "technique" | "sourceCueBeat" | "sourceExitBeat" | "targetEntryBeat" | "transitionMode" | "bars" | "confidence" | "performanceActions" | "inTrackActions">>; queueView?: boolean }) {
   return <div className="plan-detail-content">
+    <section aria-label="Transition">
     <h3>Transition</h3>
     <dl className="plan-detail-grid">
       {plan.technique && <div><dt>Technique</dt><dd>{plan.technique.replaceAll("_", " ")}</dd></div>}
@@ -235,7 +236,7 @@ function PlanDetails({ plan }: { plan: Partial<Pick<TransitionPlan,
       {plan.confidence != null && <div><dt>Confidence</dt><dd>{Math.round(plan.confidence * 100)}%</dd></div>}
     </dl>
     {plan.sourceExitBeat == null && <p className="panel-details__note">Cue details were not retained for this transition.</p>}
-    <h3>Transition actions</h3>
+    {queueView ? <h4 className="plan-detail-subheading">Actions</h4> : <h3>Transition actions</h3>}
     {plan.performanceActions?.length ? <>
       <p className="panel-details__note">The handoff and its preparation / recovery actions. Beat 0 is the handoff; negative offsets happen before it.</p>
       <ul className="action-parameters">{plan.performanceActions.map((action, index) => <li key={index}>
@@ -247,6 +248,7 @@ function PlanDetails({ plan }: { plan: Partial<Pick<TransitionPlan,
         {action.fade_out_seconds != null && ` · fade ${action.fade_out_seconds}s`}
       </li>)}</ul>
     </> : <p className="panel-details__note">No action details recorded for this transition.</p>}
+    </section>
     <InTrackActions actions={plan.inTrackActions} />
   </div>;
 }
@@ -498,12 +500,11 @@ function TransitionReadiness({
     <div className={`transition-edge transition-edge--${edge.status}`}>
       <details className="queue-plan-details">
         <summary><i aria-hidden="true" /><span>{displayStatus}</span>
-          {plan?.technique && <span className="queue-plan-technique">{plan.technique.replaceAll("_", " ")}</span>}
           <span className="queue-plan-label">Plan details</span>
         </summary>
-        <PlanDetails plan={plan ?? edge} />
+        <PlanDetails plan={plan ?? edge} queueView />
         <div className="queue-plan-reason">
-          <h3>Decision</h3>
+          <details className="panel-details"><summary>Decision & request details</summary>
           {(plan?.reason ?? edge.reason) && <p>{(plan?.reason ?? edge.reason)?.replaceAll("_", " ")}</p>}
           <p className="panel-details__note">{edge.candidateCount} local candidates · {usesMeta ? "Selected by Meta" : edge.selectedBy === "fixture" ? "Demo fixture" : "No Meta selection"}</p>
           {usesMeta && edge.metaOrigin && <p className="panel-details__note">
@@ -511,6 +512,7 @@ function TransitionReadiness({
             <br />Request {edge.metaOrigin.requestId} · candidate {edge.metaOrigin.candidateId ?? "pair selection"}
           </p>}
           {usesMeta && !edge.metaOrigin && <p className="panel-details__note">Earlier Meta decision · request history unavailable</p>}
+          </details>
         </div>
       </details>
       {beatsToFinalArm != null && ["planning", "planned"].includes(edge.status) && (
