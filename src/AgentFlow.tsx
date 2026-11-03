@@ -51,8 +51,8 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
     return () => clearInterval(timer);
   }, [active]);
   const flow = useMemo(() => deriveAgentFlow(state, webcam, disconnected, now), [state, webcam, disconnected, now]);
-  const detail = [...flow.preparation, ...flow.liveNodes, ...flow.crowd].find(n => n.id === selected)!;
-  const inFlight = flow.records.filter(c => c.status === "calling");
+  const preparation = flow.preparation;
+  const detail = preparation.find(n => n.id === selected) ?? preparation[0];
   return <div className="agent-flow">
     <section className="flow-intro">
       <div><span className="eyebrow">Full-stack execution map</span><h1>Inside the AI DJ</h1>
@@ -60,12 +60,6 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
       <div className={`flow-connection ${flow.fresh ? "is-live" : ""}`}><span className="flow-light" />
         {flow.fresh ? "Live observer connected" : state.dataSource === "simulation" ? "DJ simulation · no live execution evidence" : "Waiting for fresh live telemetry"}</div>
     </section>
-    <div className="flow-summary">
-      <div><span>Prepared tracks</span><strong>{state.dataSource === "live" && !disconnected ? state.setBuilder?.queue.length ?? "—" : "—"}</strong><small>Selection, not playback</small></div>
-      <div><span>Model calls in flight</span><strong>{flow.inFlight ?? "—"}</strong><small>Observed requests only</small></div>
-      <div><span>Handoffs completed</span><strong>{flow.completed ?? "—"}</strong><small>This bridge session</small></div>
-      <div><span>Execution mode</span><strong className="flow-summary__mode">{flow.fresh ? state.autoArmEnabled ? "Auto arm" : "Automation suspended" : "Unverified"}</strong><small>Human takeover stays authoritative</small></div>
-    </div>
     <div className="flow-legend" aria-label="Node status legend">
       {[["running", "Working"], ["done", "Complete / available"], ["waiting", "Waiting"], ["error", "Failed / blocked"], ["idle", "Idle / no evidence"]].map(([kind, label]) =>
         <span key={kind} className={`flow-node--${kind}`}><i className="flow-light" />{label}</span>)}
@@ -73,21 +67,9 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
     </div>
     <section className="flow-section" aria-labelledby="preparation-flow-title">
       <div className="flow-section__heading"><div><span className="flow-section__index">01</span><h2 id="preparation-flow-title">Analyze first, then select</h2></div><span>Library → All-In-One + DSP → Muse Spark → Select & order</span></div>
-      <Lane nodes={flow.preparation} selected={selected} setSelected={selectNode} name="prepare" />
+      <Lane nodes={preparation} selected={selected} setSelected={selectNode} name="prepare" />
       <p className="flow-section__note">Build completes local analysis, then Muse Spark music descriptions for the entire library before selecting songs. Existing results are reused; either stage can also run separately. After selection, prepare adjacent transition candidates, export the playlist, build and review the first performance window, then start playback explicitly.</p>
 
-    </section>
-    <section className="flow-section flow-section--loop" aria-labelledby="live-flow-title">
-      <div className="flow-section__heading"><div><span className="flow-section__index">02</span><h2 id="live-flow-title">The live agent loop</h2></div><span>Triggered by state changes · no continuous LLM polling</span></div>
-      <Lane nodes={flow.liveNodes} selected={selected} setSelected={setSelected} name="live" />
-      <div className={`flow-return ${flow.fresh && inFlight.length ? "is-active" : ""}`} aria-hidden="true"><span>↶</span><i /><b>Next track · changed queue · human action · crowd feedback</b><i /><span>↵</span></div>
-      <div className="flow-callout"><span className="flow-callout__symbol">↻</span><p><strong>{flow.fresh && inFlight.length ? "Meta is working on a bounded decision." : "Observe continuously. Call Meta when a decision is needed."}</strong>
-        <span>Future plans may be prepared while the current track plays. Only the local executor controls the timed handoff.</span></p></div>
-    </section>
-    <section className="flow-section" aria-labelledby="crowd-flow-title">
-      <div className="flow-section__heading"><div><span className="flow-section__index">03</span><h2 id="crowd-flow-title">Audience feedback</h2></div><span>Optional branch → future plans only</span></div>
-      <Lane nodes={flow.crowd} selected={selected} setSelected={setSelected} name="crowd" />
-      <p className="flow-section__note">Movement is not enjoyment. Uncertain or expired evidence holds the current direction; staged changes wait for a verified handoff.</p>
     </section>
     <div className="flow-inspection">
       <section className={`flow-detail flow-node--${detail.status}`} aria-labelledby="flow-detail-title">

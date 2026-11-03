@@ -11,7 +11,6 @@ import { RollingPlanner } from "./MetaActivity";
 import { InTrackActions } from "./InTrackActions";
 import { PlanningMemory } from "./PlanningMemory";
 import { usePreparedQueue } from "./queuePresentation";
-import { CrowdObservation } from "./CrowdObservation";
 import type {
   CopilotState,
   WebcamFlowState,
@@ -1016,7 +1015,6 @@ function App() {
           <RollingPlanner state={state} />
           <EventLog events={state.events} />
         </div>
-        <CrowdObservation />
         </div>
       </main>
 
@@ -1028,7 +1026,7 @@ function App() {
               ? state.autoArmEnabled
                 ? "Prepare your set in Agent flow. Take over here during playback."
                 : "Automation is suspended. Start a reviewed set or recover before resuming Auto arm."
-              : "DJ controls are simulated. Crowd observation uses real Meta requests for uploads and while webcam capture is on. Adaptive DJ requires Live Mixxx."}
+              : "DJ controls are simulated. Webcam observation uses real Meta requests while capture is on. Adaptive DJ requires Live Mixxx."}
           </p>
           {state.dataSource === "live" && actionNotice && (
             <small className="action-notice">{actionNotice}</small>
