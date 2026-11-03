@@ -57,8 +57,7 @@ class MusicFeatures:
         pending.replace(folder / "result.json")
 
     def _request(self, payload: dict) -> str:
-        for path in (self.data_root / ".env", self.workspace / ".env", self.workspace / "experiments/meta-dj-agent/.env"):
-            load_dotenv(path)
+        load_dotenv(self.data_root / ".env")
         key = os.environ.get("MODEL_API_KEY")
         if not key:
             raise ValueError("MODEL_API_KEY is missing")

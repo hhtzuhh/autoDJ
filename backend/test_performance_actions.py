@@ -14,7 +14,6 @@ from in_track_actions import compile_in_track, validate_in_track_actions
 from meta_planner import select_with_meta
 from live_bridge import LiveStateStore
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "experiments/time-map"))
 import transition
 import routine_executor
 

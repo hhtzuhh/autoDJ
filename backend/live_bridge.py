@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge the verified workspace Mixxx observer into the React state contract.
-
-This development bridge intentionally imports the still-private experiment
-implementation from a sibling workspace. It proves the live product data path
-without claiming that the observer has already been fully promoted into the
-public repository.
-"""
+"""Bridge the product Mixxx observer into the React state contract."""
 
 from __future__ import annotations
 
@@ -61,7 +55,7 @@ from set_activation import (  # noqa: E402
 )
 
 
-DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
+DEFAULT_WORKSPACE = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8765
 ACCENTS = ("cyan", "violet", "amber")
@@ -622,9 +616,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                 return 409, {"error": f"invalid prepared set: {error}"}
 
-            mixxx_root = self.workspace / "experiments/mixxx-control"
-            if str(mixxx_root) not in sys.path:
-                sys.path.insert(0, str(mixxx_root))
             self.activation_in_progress = True
             started_run = None
             try:
@@ -921,9 +912,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 f"{live_selection['source_window_id']}-{unique}"
             )
 
-            live_root = self.workspace / "experiments/live-performance"
-            if str(live_root) not in sys.path:
-                sys.path.insert(0, str(live_root))
             from lifecycle_supervisor import LifecycleSupervisor
             from plan_lifecycle import PerformanceSnapshot
             from queue_service import QueueStore
@@ -1037,9 +1025,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
         slot = self.sampler_slots.get(target_id)
         if slot is None:
             raise RuntimeError("next_track_not_prepared_load_it_into_idle_deck")
-        mixxx_root = self.workspace / "experiments/mixxx-control"
-        if str(mixxx_root) not in sys.path:
-            sys.path.insert(0, str(mixxx_root))
         import mido
         from probe import port_name, send_load_sampler_value
         revision = int(performance.revision)
@@ -1329,8 +1314,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 queue_revision = int(self.queue["revision"])
                 source_deck = int(active["deck_b"]["deck"])
                 target_deck = int(active["deck_a"]["deck"])
-                load_dotenv(BACKEND_ROOT.parent / ".env")
-                load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+                load_dotenv(self.data_root / ".env")
                 config = MetaConfig.from_environment()
                 self._append_system_event(
                     "Future Meta window started",
@@ -1643,8 +1627,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "reason": None,
             }
 
-            load_dotenv(BACKEND_ROOT.parent / ".env")
-            load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+            load_dotenv(self.data_root / ".env")
             meta_call = None
             try:
                 config = MetaConfig.from_environment()
@@ -1762,8 +1745,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
     ) -> list[dict[str, Any]]:
         # The local search remains bounded (16 options per edge, at most 4096
         # combinations). Apply live constraints BEFORE the ten-candidate API cap.
-        load_dotenv(BACKEND_ROOT.parent / ".env")
-        load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+        load_dotenv(self.data_root / ".env")
         feasible = []
         shifted_feasibility: dict[tuple[int, int], bool] = {}
         for candidate in build_transition_window_candidates(pairings, intent=intent, limit=None):
@@ -1991,8 +1973,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             "selectedBy": None,
             "reason": None,
         }
-        load_dotenv(BACKEND_ROOT.parent / ".env")
-        load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
+        load_dotenv(self.data_root / ".env")
         meta_call = None
         try:
             config = MetaConfig.from_environment()
@@ -2340,9 +2321,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "error": "recovery_source_must_be_playing",
                 "message": "Resume the source Deck before requesting live recovery.",
             }
-        live_root = self.workspace / "experiments/live-performance"
-        if str(live_root) not in sys.path:
-            sys.path.insert(0, str(live_root))
         from live_replanner import build_live_replan_selection
         from plan_lifecycle import PerformanceSnapshot
         from queue_service import QueueSnapshot as LiveQueueSnapshot
@@ -2669,9 +2647,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "Loading next queue track",
                 f"Loading the verified queue slot for {target_id[:8]} directly into Deck {recycled_deck}.",
             )
-            mixxx_root = self.workspace / "experiments/mixxx-control"
-            if str(mixxx_root) not in sys.path:
-                sys.path.insert(0, str(mixxx_root))
             import mido
             from probe import port_name, send_load_sampler_value
 
@@ -2812,9 +2787,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 return
             next_track_id = queue_ids[source_index + 1]
             target_deck = 1 if deck_number == 2 else 2
-            mixxx_root = self.workspace / "experiments/mixxx-control"
-            if str(mixxx_root) not in sys.path:
-                sys.path.insert(0, str(mixxx_root))
             import mido
             from probe import (
                 port_name,
@@ -3570,8 +3542,6 @@ def main() -> int:
     os.environ["DJ_RUNTIME_DIR"] = str(data_root / "artifacts/mixxx-runtime")
     load_dotenv(data_root / ".env")
     os.environ["DJ_ANALYSIS_ROOT"] = str(analysis_root(data_root))
-    mixxx_root = workspace / "experiments/mixxx-control"
-    sys.path.insert(0, str(mixxx_root))
     from observer import run_observer
     from probe import COMMAND_LOG, port_name
 

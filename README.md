@@ -9,6 +9,60 @@ This public repository is being built for the Meta Global AI Developer
 Hackathon. The current React dashboard is the first product adaptation of a
 separately validated local prototype.
 
+## Standalone setup (macOS)
+
+The supported local setup is Apple Silicon macOS, Python 3.11, Node >=22.18,
+ffmpeg/ffprobe on PATH, and Mixxx 2.5.6. Install those prerequisites first.
+The Python pins were verified on this platform; other operating systems and
+Python versions have not been verified. Clone this repository into any directory;
+no sibling workspace or `experiments/` folder is needed.
+
+```sh
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+npm ci
+cp .env.example .env
+npm run data:init
+```
+
+Set `MODEL_API_KEY` in your local `.env` for real Meta calls. Importing songs,
+Build, music descriptions, and active webcam analysis use the configured Meta
+services; API access is required. Keep credentials and audio out of Git.
+Put your own MP3/WAV files in `local-assets/samples/` (at least two songs).
+
+Install the supplied [Mixxx MIDI mapping](mixxx/README.md) and start Mixxx.
+In separate terminals, from this checkout:
+
+```sh
+npm run bridge
+npm run dev
+# Optional webcam/clip observation service:
+npm run crowd
+```
+
+Open `http://127.0.0.1:5173/?source=live&view=flow`.
+Use **Build → Prepare transitions → Export Mixxx playlist**, open that playlist
+in Mixxx and select its first row, then **Build performance plan → Start playback**.
+Build analyzes all imported songs and requests Meta music descriptions before
+selecting the set. The initial plan is reviewed with both decks stopped.
+Use the simulation view without `source=live` to inspect the UI without hardware.
+
+Verification without Meta calls or playback:
+
+```sh
+npm run test:backend
+npm run test:flow
+npm run test:crowd
+npm run build
+.venv/bin/python scripts/smoke_dsp.py
+```
+
+The smoke check synthesizes two temporary rhythmic WAV files, analyzes them via
+the real DSP subprocess, builds pair candidates and validates an executor plan.
+It sends no MIDI commands. Unit tests simulate execution and human takeover;
+these checks do not establish audible mixing quality.
+See [adaptation and verification details](docs/STANDALONE_RUNTIME.md).
+
 ## Current status
 
 ### Swappable local audio analysis
@@ -35,20 +89,24 @@ Semantic sections are empty (unknown), and phrase boundaries are unconfirmed.
 This change does not establish audible transition quality. Muse audio
 descriptions and Meta performance planning remain separate nodes.
 
-DSP needs `ffmpeg` / `ffprobe` on PATH and Python 3.11 with
-`pip install -r requirements-analysis.txt`. Set `DJ_ANALYSIS_PYTHON` to that
-Python executable. During workspace development the existing time-map virtual
-environment is used automatically if present. The DSP implementation itself
-does not import experiment code. The optional All-In-One adapter still requires
-the original `experiments/time-map` and `experiments/allin1-local` environments.
-
-Standalone analysis from the product directory:
+The default `.venv` includes DSP and MIDI dependencies. `DJ_ANALYSIS_PYTHON`
+optionally selects a separate Python executable with `requirements-analysis.txt`
+installed; otherwise analysis uses the bridge's interpreter.
 
 ```sh
-../experiments/time-map/.venv/bin/python backend/track_analyzer.py local-assets/samples/example.mp3 --backend essentia_dsp
-# Optional original implementation:
-../experiments/time-map/.venv/bin/python backend/track_analyzer.py local-assets/samples/example.mp3 --backend all_in_one
+.venv/bin/python backend/track_analyzer.py local-assets/samples/example.mp3 --backend essentia_dsp
 ```
+
+All-In-One remains optional and has its own local normalization/DSP adapter.
+Install its inference dependencies and models in a separate environment, then
+set `DJ_ALLIN1_CLI=/absolute/path/to/all-in-one-infer` in `.env` and
+`DJ_ANALYSIS_BACKEND=all_in_one`. For direct CLI use, export `DJ_ALLIN1_CLI` in
+the shell as well. It can also resolve `all-in-one-infer` from PATH.
+The main requirements deliberately do not install its model dependencies.
+See the [upstream installation instructions](https://github.com/openmirlab/all-in-one-infer)
+for that optional environment. The retained adapter uses `all-in-one-infer` 3.1.0's
+CLI interface; fresh model installation/inference has not been revalidated in
+the standalone packaging check.
 
 Essentia is an AGPL dependency; retain its notices and comply with its license
 when distributing an integrated application. See [Essentia licensing](https://essentia.upf.edu/licensing_information.html).
@@ -210,7 +268,7 @@ mix; `cut_to_next` accepts a direct cut or a 0.5-second outgoing fade. Older pla
 remain readable through the legacy executor. Echo, filter, and loop automation
 are not available functions.
 
-The executor still lives in sibling `experiments/time-map/routine_executor.py`.
+The product executor lives in `backend/routine_executor.py`.
 It follows observed file position, not a fixed wall-clock BPM timer, and requires
 Mixxx mapping protocol 2. It verifies playback-rate readback without changing file
 BPM metadata. Cancellation preserves the audible deck's current tempo; human
@@ -260,11 +318,10 @@ BPM readings and were restored to 1.0. No playback was started by that probe.
 - Implemented here: responsive React/TypeScript control-room UI, typed state
   contract, queue/Deck/plan/event views, deterministic adjacent-pair analysis,
   and bounded Meta selection for the current A–B–C window.
-- Development bridge implemented: the verified private-workspace Mixxx
-  observer can now feed real Deck identity, play state, beat, position, sync,
-  queue revision, plan provenance, and events into the dashboard. This bridge
-  still depends on the sibling experimental workspace and is not yet the
-  standalone public observer implementation.
+- Product-local bridge, observer, lifecycle supervisor and executor feed real
+  Deck identity, play state, beat, position, sync, queue revision, plan provenance
+  and events into the dashboard. The supplied mapping and Python dependencies
+  are sufficient without the development workspace.
 - Set-list adapter implemented: an analyzed, versioned runtime queue resolves
   to hash-verified local audio and an ordered Mixxx playlist. After A→B, the
   bridge can recycle the stopped Deck, verify the loaded C identity, promote
@@ -328,8 +385,8 @@ BPM readings and were restored to 1.0. No playback was started by that probe.
   plan without seeking or starting the source; resume it before arming.
   Cancelled plans cannot be revived by toggling Auto arm, and the near-end
   continuity guard stays disabled after cancellation until explicit recovery.
-- Not included here yet: a standalone public Mixxx observer/executor and
-  redistributable audio fixtures.
+- Private demo songs and model weights are not included. The DSP smoke check
+  creates synthetic test audio at runtime.
 - The UI labels simulation data explicitly. It does not present fixture events
   as live model or audio-engine behavior.
 - Crowd observation: a separate manual-upload panel sends a silent clip to
@@ -340,7 +397,7 @@ BPM readings and were restored to 1.0. No playback was started by that probe.
 
 ## Run the frontend
 
-Requires Node.js 20 or newer.
+Requires Node.js >=22.18.
 
 ```bash
 npm install
@@ -463,7 +520,7 @@ projection/telemetry tests. A full playing-set and audience-feedback rehearsal
 of the new display is still pending. Run `npm run test:flow` with Node >=22.18
 (native TypeScript stripping), plus the backend suite below.
 
-### Development live bridge
+### Live bridge and local data
 
 From the `submission/` directory, put your private songs in
 `local-assets/samples/` **before starting the bridge**. This folder and
@@ -478,11 +535,12 @@ npm run bridge
 npm run dev
 ```
 
-Open Mixxx with the installed MIDI mapping to supply observed state. The bridge
-still uses the sibling workspace's Python environments and observer/executor
-implementation; this change relocates product data, not those dependencies.
-`--workspace-root` identifies that toolchain; `--data-root` overrides the product
-data location and defaults to this repository regardless of the working directory.
+Open Mixxx with the supplied MIDI mapping to supply observed state.
+The bridge and its executor use the product `.venv`. `--data-root` overrides
+local inputs, configuration and generated output; it defaults to this repository
+regardless of the current working directory. `--workspace-root` remains accepted
+for compatibility but does not select external code or environments.
+Only the chosen data root's `.env` and process environment supply credentials.
 
 For a repeatable empty-output run, stop bridge and crowd services, then run
 `npm run data:fresh`. Previous outputs (including saved playlists) move to

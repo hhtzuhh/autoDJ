@@ -395,8 +395,7 @@ class CrowdAdaptiveMixin:
             # first few orders, which would hide distant songs from the model.
             candidates = [group[i] for i in range(3) for group in candidate_groups if len(group) > i][:10]
             if not candidates: raise ValueError('No bounded order has a feasible transition window.')
-            load_dotenv(Path(__file__).parent.parent / '.env')
-            load_dotenv(self.workspace / 'experiments/meta-dj-agent/.env')
+            load_dotenv(self.data_root / '.env')
             config = MetaConfig.from_environment()
             meta_call = self._begin_meta_call(config, tuple(ids[index:index+4]), 'crowd_adaptive')
             context_data = {**evidence, **self._planning_memory_context(tuple(ids), for_gesture=True),

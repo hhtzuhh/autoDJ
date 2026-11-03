@@ -17,7 +17,6 @@ from meta_planner import MetaDecision, MetaSelection, build_transition_window_ca
 from test_meta_planner import pair
 from transition_techniques import TECHNIQUES, apply_technique, selected_techniques, validate_selection_policy
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "experiments/time-map"))
 import transition
 
 

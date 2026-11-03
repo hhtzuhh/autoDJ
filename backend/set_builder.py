@@ -90,7 +90,7 @@ def _display_title(path: Path) -> str:
     return re.sub(r"[_-]+", " ", path.stem).strip() or "Unknown track"
 
 
-def probe_audio(path: Path, ffprobe: str = "/opt/homebrew/bin/ffprobe") -> dict[str, Any]:
+def probe_audio(path: Path, ffprobe: str = "ffprobe") -> dict[str, Any]:
     completed = subprocess.run(
         [
             ffprobe,
@@ -360,9 +360,6 @@ class SetBuilderService:
         from meta_planner import load_dotenv
 
         load_dotenv(self.data_root / ".env")
-        load_dotenv(self.workspace / "submission/.env")
-        load_dotenv(self.workspace / ".env")
-        load_dotenv(self.workspace / "experiments/meta-dj-agent/.env")
         # Preparation has no live cue deadline. Do not raise the rolling
         # transition planner's global budget or add retries to its transport.
         config = replace(MetaConfig.from_environment(),

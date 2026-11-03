@@ -65,7 +65,9 @@ test('manual upload calls only Files and Muse, retains evidence, serves clip ran
   const request = JSON.parse(calls[1].options.body);
   assert.equal(request.model, 'muse-spark-1.3');
   assert.equal(request.input[0].content[1].file_id, 'file-synthetic');
-  assert.equal((await dispatch(server, '/api/crowd/status')).json().activeJobId, null);
+  // Terminal model status precedes async result persistence and worker release.
+  // Wait for that release before asserting the durable result below.
+  await until(async () => (await dispatch(server, '/api/crowd/status')).json().activeJobId === null);
   assert.equal(JSON.parse(await readFile(path.join(root, id, 'result.json'))).status, 'completed');
   assert.ok((await readFile(path.join(root, id, 'muse-prompt.txt'), 'utf8')).includes('No previous clips'));
   const range = await dispatch(server, `/api/crowd/jobs/${id}/clip`, {headers: {range: 'bytes=0-3'}});

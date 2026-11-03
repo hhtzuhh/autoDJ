@@ -1,7 +1,7 @@
 """Interchangeable audio-file -> dj-track-analysis-v1 adapters.
 
-DSP is product-local. The optional All-In-One adapter retains the existing
-workspace implementation and its isolated model environment.
+Both adapters are product-local. Optional All-In-One inference uses an
+explicitly configured, isolated model environment.
 """
 from __future__ import annotations
 
@@ -144,14 +144,9 @@ def dsp_analysis(source: Path, work: Path, limit: int, workspace: Path) -> dict:
 
 
 def all_in_one_analysis(source: Path, work: Path, limit: int, workspace: Path) -> dict:
-    script = workspace / "experiments/time-map/unified_analysis.py"
-    python = workspace / "experiments/time-map/.venv/bin/python"
-    if not script.is_file() or not python.is_file():
-        raise RuntimeError("Optional All-In-One backend needs the existing workspace experiment environments")
-    staging = work / "allin1-adapter-result.json"
-    subprocess.run([str(python), str(script), str(source), "--work-directory", str(work),
-                    "--output", str(staging), "--device", "cpu", "--limit", str(limit)], check=True)
-    result = json.loads(staging.read_text())
+    from allin1_analysis import run_allin1, build_analysis
+    raw = run_allin1(source, work, "cpu")
+    result = build_analysis(source, raw, "unreviewed", limit)
     result["provenance"].update(backend="all_in_one", model_based=True)
     validate_analysis(result)
     return result
@@ -177,8 +172,7 @@ def analyze(source: Path, output: Path, backend: str, workspace: Path, limit: in
 
 def run_for_product(source: Path, output: Path, backend: str, workspace: Path) -> dict:
     """Run heavy imports in an isolated process, keeping the bridge responsive."""
-    old_python = workspace / "experiments/time-map/.venv/bin/python"
-    python = os.environ.get("DJ_ANALYSIS_PYTHON") or (str(old_python) if old_python.is_file() else sys.executable)
+    python = os.environ.get("DJ_ANALYSIS_PYTHON") or sys.executable
     neural_cached = (output.parent / "allin1-raw/source.json").is_file()
     output.parent.mkdir(parents=True, exist_ok=True)
     with (output.parent / "analyzer.log").open("a") as log:
@@ -193,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument("source", type=Path)
     parser.add_argument("--backend", choices=BACKENDS, default=selected_backend())
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--workspace", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--workspace", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--limit", type=int, default=5)
     args = parser.parse_args()
     output = args.output or analysis_root(Path(__file__).resolve().parents[1], args.backend) / file_hash(args.source) / "track-analysis-v1.json"
