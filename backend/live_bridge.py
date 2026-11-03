@@ -52,6 +52,7 @@ from flow_telemetry import LiveFlowTelemetry  # noqa: E402
 from clean_break import compile_clean_break_plan, select_clean_break_with_meta  # noqa: E402
 from transition_techniques import apply_technique, selected_techniques  # noqa: E402
 from performance_actions import compile_routine, validate_window_actions  # noqa: E402
+from in_track_actions import compile_in_track, validate_in_track_actions  # noqa: E402
 from set_activation import (  # noqa: E402
     load_prepared_activation,
     prepare_activation,
@@ -1118,8 +1119,16 @@ class LiveStateStore(CrowdAdaptiveMixin):
     @staticmethod
     def _active_edge_details(plan: dict[str, Any]) -> dict[str, Any]:
         return {key: plan.get(key) for key in (
-            "sourceExitBeat", "targetEntryBeat", "bars", "metaOrigin",
+            "sourceCueBeat", "sourceExitBeat", "targetEntryBeat", "bars", "metaOrigin",
+            "technique", "transitionMode", "performanceActions", "inTrackActions", "confidence",
         )}
+
+    @staticmethod
+    def _buffer_action_details(edge: dict[str, Any]) -> dict[str, Any]:
+        routine = edge.get("routine", {})
+        return {"technique": edge.get("technique"), "transitionMode": edge.get("mode"),
+                "performanceActions": routine.get("actions", []),
+                "inTrackActions": routine.get("in_track_actions")}
 
     def _finish_meta_call(self, request_id: str | None, error: Exception | None = None) -> None:
         if request_id is None:
@@ -1284,6 +1293,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                         "targetEntryBeat": int(edge["target_entry_beat_index"]),
                         "bars": int(edge["transition_bars"]),
                         "metaOrigin": compiled.get("meta_origin"),
+                        **self._buffer_action_details(edge),
                     }
                 self._append_system_event(
                     "Future Meta window ready",
@@ -1637,6 +1647,8 @@ class LiveStateStore(CrowdAdaptiveMixin):
             # bounds exist. Old synthetic / persisted candidates stay readable.
             if all(edge["mode"] == "clean_break" or edge.get("tempo_bounds") for edge in candidate["transitions"]):
                 candidate["action_planning"] = True
+                candidate["in_track_planning"] = True
+                candidate["in_track_source_ids"] = queue_ids[source_index:source_index + len(candidate["transitions"])]
                 candidate["transitions"][0]["earliest_source_action_beat"] = minimum_exit
             candidate["refill_timing"] = self._window_refill_timing(
                 candidate["transitions"], queue_ids[source_index:source_index + len(pairings) + 1],
@@ -1662,6 +1674,9 @@ class LiveStateStore(CrowdAdaptiveMixin):
             # Include tempo recovery, next pre-ramp, and deck recycle margin.
             ready_beat = int(left["target_entry_beat_index"]) + int(left["transition_bars"]) * 4 + int(left.get("routine", {}).get("post_beats", 0)) + 8
             exit_beat = int(right["source_exit_beat_index"]) - int(right.get("routine", {}).get("pre_beats", 0))
+            in_track = right.get("routine", {}).get("in_track_actions", [])
+            if in_track:
+                exit_beat = min(exit_beat, min(a["start_beat"] for a in in_track))
             if 0 <= ready_beat < len(beats) and 0 <= exit_beat < len(beats):
                 runway.append(max(0.0, (float(beats[exit_beat]) - float(beats[ready_beat])) / 1.2))
         minimum = min(runway) if runway else None
@@ -1757,7 +1772,10 @@ class LiveStateStore(CrowdAdaptiveMixin):
             )
             plan["plan_id"] = f"{plan['plan_id']}-{suffix}"
             if edge.get("routine"):
-                return compile_routine(plan, edge, edge["routine"])
+                compile_routine(plan, edge, edge["routine"])
+                if "in_track_actions" in edge["routine"]:
+                    compile_in_track(plan, edge["routine"]["in_track_actions"])
+                return plan
             return apply_technique(plan, edge.get("technique", "clean_cut"))
         plan = self._build_executable_plan(
             source_id=source_id,
@@ -1772,7 +1790,10 @@ class LiveStateStore(CrowdAdaptiveMixin):
             use_bass_swap=bool(edge.get("use_bass_swap", False)),
         )
         if edge.get("routine"):
-            return compile_routine(plan, edge, edge["routine"])
+            compile_routine(plan, edge, edge["routine"])
+            if "in_track_actions" in edge["routine"]:
+                compile_in_track(plan, edge["routine"]["in_track_actions"])
+            return plan
         return apply_technique(plan, edge.get("technique", "bass_swap" if edge.get("use_bass_swap") else "crossfade"))
 
     @staticmethod
@@ -1802,6 +1823,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "sourceExitBeat": int(edge["source_exit_beat_index"]),
                 "targetEntryBeat": int(edge["target_entry_beat_index"]),
                 "bars": int(edge["transition_bars"]),
+                **self._buffer_action_details(edge),
             }
 
     def _planning_track_context(self, track_ids: tuple[str, ...]) -> dict[str, Any]:
@@ -1926,6 +1948,9 @@ class LiveStateStore(CrowdAdaptiveMixin):
     ) -> dict[str, Any]:
         actions = getattr(selection.decision, "transition_actions", None)
         routines = validate_window_actions(selection.candidate["transitions"], actions) if actions is not None else None
+        if selection.candidate.get("in_track_planning"):
+            validate_in_track_actions(selection.candidate["transitions"], routines,
+                                      selection.decision.in_track_actions, track_ids)
         techniques = [r["technique"] for r in routines] if routines else selected_techniques(selection.decision, selection.candidate["transitions"])
         transition_buffer = [
             {
@@ -3158,6 +3183,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             "transitionMode": transition_mode,
             "technique": plan_payload["mix"].get("technique", "clean_cut" if transition_mode == "clean_break" else "bass_swap" if plan_payload["mix"].get("bass_swap") else "crossfade"),
             "performanceActions": plan_payload.get("performance_actions", []),
+            "inTrackActions": plan_payload.get("in_track_actions"),
             "tempoRoutine": plan_payload.get("tempo_routine"),
             "intent": str(self.selection.get("intent", "maintain_energy")).replace("_", " ").title(),
             "confidence": min(1.0, max(0.0, confidence)),
@@ -3231,6 +3257,8 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 # timing/provenance from the actual executable plan, not an old
                 # future-window override for the same pair.
                 payload.update(self._active_edge_details(plan))
+                # Retain actual action details when the window advances.
+                self.transition_overrides.setdefault((edge.source_track_id, edge.target_track_id), {}).update(self._active_edge_details(plan))
                 if plan_status in {"draft", "ready", "armed", "executing"}:
                     payload["status"] = (
                         "ready" if plan_status in {"draft", "ready"} else plan_status

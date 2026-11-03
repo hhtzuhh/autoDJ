@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from transition_techniques import TECHNIQUES, selected_techniques, technique_options
 from performance_actions import ACTION_CATALOG, ACTION_SHAPE_EXAMPLES, tempo_ramp_options, validate_window_actions
+from in_track_actions import IN_TRACK_CATALOG, validate_in_track_actions
 
 
 Intent = Literal["maintain_energy", "clean_break", "impact_at_handoff"]
@@ -59,6 +60,19 @@ Source start cannot precede
 earliest_source_action_beat. In the middle track, target entry + mix beats + return
 ramp beats + 32 dwell beats must be <= next exit - next source ramp beats.
 Provide the complete window in ONE call. No arbitrary Python, effects or IDs.
+When in_track_actions is required, return a separate flat array of optional
+source-song actions from in_track_catalog, or [] to leave songs unchanged.
+Choosing [] is a valid musical decision; never add effects just to demonstrate
+capability. Each action has exactly function, track_id, start_beat, duration_beats,
+depth. Here start_beat is an ABSOLUTE SONG BEAT, not a handoff offset. Use the
+candidate's in_track_windows and subtract your chosen source pre-ramp from its
+end; for middle songs also wait until previous entry + blend + return ramp + 32
+beats. Finish at least 8 beats before the source ramp/handoff; keep 8 beats between
+actions. Maximum 2 per source song. The last target has no standalone action slot
+until its outgoing edge is planned. Select a meaningful reason in the overall
+reason field for adding actions or leaving the songs unchanged. Do not claim
+cue-specific drops/vocals from whole-song descriptions. These are low-EQ/volume
+controls only, not loops, filters, stems or echo.
 Use musical reasons to compare cut vs overlap, not just the highest local score.
 Use the technique_catalog descriptions and tradeoffs, local musical_evidence,
 and any track_context; track descriptions are unverified whole-song observations,
@@ -123,9 +137,12 @@ class MetaDecision:
     reason: str
     transition_techniques: tuple[str, ...] | None = None
     transition_actions: list[list[dict]] | None = None
+    in_track_actions: list[dict] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
+        if self.in_track_actions is None:
+            result.pop("in_track_actions")
         if self.transition_actions is not None:
             result.pop("use_bass_swap")
             result.pop("transition_techniques")
@@ -434,6 +451,15 @@ def prompt_for(
         if candidate.get("action_planning"):
             for edge in candidate.get("transitions", [candidate.get("transition", {})]):
                 edge["tempo_ramp_options"] = tempo_ramp_options(edge)
+            if candidate.get("in_track_planning"):
+                edges = candidate["transitions"]
+                candidate["in_track_windows"] = [
+                    {"track_id": track_ids[i],
+                     "earliest_beat": max(edge.get("earliest_source_action_beat", 8),
+                         edges[i-1]["target_entry_beat_index"] + edges[i-1]["transition_bars"] * 4 + 32 if i else 8),
+                     "end_before_beat": edge["source_exit_beat_index"] - 8,
+                     "note": "Add previous return-ramp beats to earliest; subtract this source pre-ramp from end."}
+                    for i, edge in enumerate(edges)]
     return json.dumps(
         {
             "task": "select_one_temporally_feasible_rolling_plan",
@@ -446,6 +472,7 @@ def prompt_for(
             "candidate_data": bounded,
             "technique_catalog": TECHNIQUES,
             "action_catalog": ACTION_CATALOG,
+            "in_track_catalog": IN_TRACK_CATALOG,
             "action_shape_examples": ACTION_SHAPE_EXAMPLES,
             "action_required_keys": {name: ["function", *definition["parameters"]]
                                      for name, definition in ACTION_CATALOG.items()},
@@ -458,6 +485,7 @@ def prompt_for(
                 "transition_actions" if bounded[0].get("action_planning") else "transition_techniques" if "transitions" in bounded[0] or "transition" in bounded[0] else "use_bass_swap",
                 "confidence",
                 "reason",
+                *(["in_track_actions"] if bounded[0].get("in_track_planning") else []),
             ],
         },
         ensure_ascii=False,
@@ -485,7 +513,7 @@ def parse_decision(text: str) -> MetaDecision:
     }
     technique_fields = (required - {"use_bass_swap"}) | {"transition_techniques"}
     action_fields = (required - {"use_bass_swap"}) | {"transition_actions"}
-    if set(payload) not in (required, technique_fields, action_fields):
+    if set(payload) not in (required, technique_fields, action_fields, action_fields | {"in_track_actions"}):
         raise ValueError("Meta decision fields do not match the strict schema")
     if not isinstance(payload["selected_candidate_id"], str) or not payload[
         "selected_candidate_id"
@@ -517,6 +545,7 @@ def parse_decision(text: str) -> MetaDecision:
         reason=reason.strip(),
         transition_techniques=tuple(techniques) if techniques is not None else None,
         transition_actions=payload.get("transition_actions"),
+        in_track_actions=payload.get("in_track_actions"),
     )
 
 
@@ -535,7 +564,11 @@ def validate_decision(
     edges = candidate.get("transitions") or ([candidate["transition"]] if "transition" in candidate else [])
     if edges:
         if candidate.get("action_planning"):
-            validate_window_actions(edges, decision.transition_actions)
+            routines = validate_window_actions(edges, decision.transition_actions)
+            if candidate.get("in_track_planning"):
+                validate_in_track_actions(edges, routines, decision.in_track_actions, candidate["in_track_source_ids"])
+            elif decision.in_track_actions is not None:
+                raise ValueError("candidate does not support in-track actions")
         else:
             selected_techniques(decision, edges)
     elif decision.transition_techniques is not None:

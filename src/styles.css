@@ -446,6 +446,12 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .transition-catalog__techniques li { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
 .transition-catalog__techniques strong { font-size: 12px; text-transform: capitalize; }
 .transition-catalog__techniques p { margin: 6px 0 0; }
+.in-track-actions { margin: 16px 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.in-track-actions h3, .plan-action-heading { color: var(--cyan); font-size: 12px; font-weight: 600; }
+.plan-action-heading { margin-top: 18px; }
+.in-track-actions ul { list-style: none; padding: 0; display: grid; gap: 12px; }
+.in-track-actions li { display: grid; gap: 5px; font-size: 12px; }
+.in-track-actions li span, .in-track-actions li small { color: var(--muted); font-size: 11px; line-height: 1.6; }
 @media (max-width: 600px) {
   .transition-catalog__techniques { grid-template-columns: 1fr; }
   .performance-timeline li { grid-template-columns: minmax(0,1fr) auto; gap: 6px 10px; }

@@ -64,6 +64,11 @@ class CrowdAdaptiveTest(unittest.TestCase):
         def choose(candidates, **kwargs):
             if callback: callback()
             chosen = next(r for r in candidates if r['ordered_track_ids'][2] == 'd')
+            if chosen.get('in_track_planning'):
+                actions = [[{'function':'cut_to_next','start_beat':0,'fade_out_seconds':.5 if t == 'fade_out_cut' else 0}]
+                           for t in techniques]
+                return MetaSelection(MetaDecision(chosen['candidate_id'], kwargs['intent'], True, .8,
+                    'Synthetic stronger handoff.', transition_actions=actions, in_track_actions=[]), chosen, 'synthetic', len(candidates))
             return MetaSelection(MetaDecision(chosen['candidate_id'], kwargs['intent'], True, .8, 'Synthetic stronger handoff.', techniques), chosen, 'synthetic', len(candidates))
         with patch('crowd_adaptive.PairAnalysisCache', cache_type), patch('crowd_adaptive.select_with_meta', side_effect=choose), patch('crowd_adaptive.MetaConfig.from_environment', return_value=MetaConfig('synthetic')):
             s._crowd_plan_worker(gen, context, evidence)

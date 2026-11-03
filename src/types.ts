@@ -110,6 +110,20 @@ export interface TransitionEdge {
   targetEntryBeat?: number;
   bars?: number;
   metaOrigin?: MetaOrigin | null;
+  sourceCueBeat?: number;
+  technique?: string;
+  transitionMode?: TransitionPlan["transitionMode"];
+  performanceActions?: TransitionPlan["performanceActions"];
+  inTrackActions?: InTrackAction[] | null;
+  confidence?: number;
+}
+
+export interface InTrackAction {
+  function: "bass_pulse" | "bass_reveal" | "volume_duck";
+  track_id: string;
+  start_beat: number;
+  duration_beats: number;
+  depth: number;
 }
 
 export interface TransitionPlan {
@@ -130,6 +144,7 @@ export interface TransitionPlan {
   transitionMode?: "beat_sync_crossfade" | "clean_break";
   technique?: string;
   performanceActions?: {function: string; start_beat: number; duration_beats?: number; target_bpm?: number; deck?: string; curve?: string; fade_out_seconds?: number}[];
+  inTrackActions?: InTrackAction[] | null;
   tempoRoutine?: {common_bpm: number; source_native_bpm: number; target_native_bpm: number; pre_beats: number; post_beats: number} | null;
   intent: string;
   confidence: number;
@@ -207,6 +222,7 @@ export interface CopilotState {
   setBuilder?: {
     techniques?: {id: string; mode: string; description: string; tradeoff: string}[];
     actionCatalog?: Record<string, {purpose: string; parameters: Record<string, unknown>; timing: string; tradeoff: string; optional: boolean}>;
+    inTrackCatalog?: Record<string, {purpose: string; tradeoff: string; timing: string; optional: boolean}>;
     performancePlan?: {
       status: "idle" | "building" | "ready" | "stale" | "failed" | "started";
       error?: string | null;
@@ -214,7 +230,7 @@ export interface CopilotState {
       model?: string;
       reason?: string;
       trackIds?: string[];
-      transitions?: {source_track_id: string; target_track_id: string; source_exit_beat_index: number; target_entry_beat_index: number; transition_bars: number; technique: string; routine?: {common_bpm?: number; actions: {function: string; start_beat: number; duration_beats?: number; target_bpm?: number; deck?: string; curve?: string; fade_out_seconds?: number}[]}}[];
+      transitions?: {source_track_id: string; target_track_id: string; source_exit_beat_index: number; target_entry_beat_index: number; transition_bars: number; technique: string; routine?: {common_bpm?: number; in_track_actions?: InTrackAction[]; actions: {function: string; start_beat: number; duration_beats?: number; target_bpm?: number; deck?: string; curve?: string; fade_out_seconds?: number}[]}}[];
     };
     selectionOnly?: boolean;
     selectionSource?: {kind: "mixxx_playlist"; filename: string};

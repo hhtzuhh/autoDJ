@@ -76,6 +76,40 @@ The Agent flow identifies restored playlists as manual imports, not AI selection
 
 ### Parameterized performance actions
 
+The same rolling Meta call now returns separate `transition_actions` and
+`in_track_actions`. The latter is optional: `[]` explicitly leaves songs alone.
+The three in-track functions are **bass pulse** (lower then restore low EQ),
+**bass reveal** (start bass-light, gradually restore), and **volume duck** (lower
+then restore channel volume). They use existing Mixxx low-EQ and volume controls,
+not stems, filters, loops or inferred drops. The UI separates both categories in
+the catalog, first-window review, AI plan and queue details; older plans are
+marked as lacking in-track decisions rather than silently treated as a Meta opt-out.
+
+In-track `start_beat` is an absolute analyzed song beat; transition action offsets
+remain relative to handoff beat 0. Meta may choose up to two actions per outgoing
+song, lasting 8–32 beats in whole bars, with an 8-beat gap. Low-EQ reduction is
+10–60%; volume reduction is 10–30% of the executor's control baseline (low EQ 0.5,
+volume 0.75), not a calibrated loudness percentage. Each action restores that
+baseline. All actions must finish eight beats before the source tempo ramp or
+handoff, and start after the previous handoff, tempo recovery and 32-beat dwell.
+The final target becomes eligible when its outgoing edge is planned. This first
+version performs source-song actions before its outgoing handoff, including when
+that handoff is a native-tempo cut.
+
+The existing executor follows actual source-file position for both stages;
+in-track actions advance the earliest automation/arm cue. Future-buffer promotion
+retains the selected actions. Cancellation restores an unfinished shaping control;
+human takeover stops further writes and preserves the human's controls. Executor
+logs distinguish `in_track_action_started` and `in_track_action_completed` from
+the handoff. UI lists are selected plans, not per-action execution confirmations.
+Synthetic tests cover both decks, all three functions, crossfade/cut, optional
+empty output, invalid timing/depth, promotion, cancellation and takeover.
+Actual audible in-track performance still requires a Mixxx listening run.
+A real Muse Spark 1.3 request on November 3 passed the new schema and timing
+validation in 25.55 seconds, explicitly returning `in_track_actions: []`. No
+playback started in that validation; nonempty action execution was tested with
+synthetic MIDI and position feedback, not a live listening run.
+
 Prepare generates cue pairs and feasible modes. The current Meta planning window
 now receives an executable action catalog, local DSP evidence, and cached Muse
 whole-song descriptions (explicitly unverified and not cue-specific). Meta chooses

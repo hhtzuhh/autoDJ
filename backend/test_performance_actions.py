@@ -10,6 +10,8 @@ import unittest
 from unittest.mock import patch, Mock
 
 from performance_actions import ACTION_CATALOG, ACTION_SHAPE_EXAMPLES, compile_routine, minimum_ramp_beats, tempo_bounds, validate_edge_actions, validate_window_actions
+from in_track_actions import compile_in_track, validate_in_track_actions
+from clean_break import compile_clean_break_plan
 from meta_planner import select_with_meta
 from live_bridge import LiveStateStore
 
@@ -128,7 +130,7 @@ class PerformanceActionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "runway"):
             validate_edge_actions({**edge(), "earliest_source_action_beat": 120}, actions())
 
-    def build_plan(self, root, source_deck=1):
+    def build_plan(self, root, source_deck=1, in_track=None, clean=False):
         store=object.__new__(LiveStateStore)
         ids=("a"*64,"b"*64)
         store.queue={"revision": 1}
@@ -136,6 +138,15 @@ class PerformanceActionsTest(unittest.TestCase):
         plan=store._build_executable_plan(source_id=ids[0],target_id=ids[1],source_exit_beat=160,target_entry_beat=16,
              transition_bars=4,model="synthetic",source_deck=source_deck,target_deck=3-source_deck,plan_suffix="routine",use_bass_swap=False)
         compile_routine(plan,edge(),validate_edge_actions(edge(),actions()))
+        if clean:
+            plan = compile_clean_break_plan(source_id=ids[0], target_id=ids[1],
+                pair={'transition_mode':'clean_break','a_exit':{'beat_index':160},'b_entry':{'beat_index':16}},
+                catalog=store.analysis_catalog, queue_revision=1, source_deck=source_deck, target_deck=3-source_deck, model='test')
+            e={**edge(), 'mode':'clean_break', 'transition_bars':0}
+            a=[{'function':'cut_to_next','start_beat':0,'fade_out_seconds':.5}]
+            compile_routine(plan,e,validate_edge_actions(e,a))
+        if in_track is not None:
+            compile_in_track(plan, in_track)
         for t,bpm in zip(ids,(120,140)):
             folder=root/t;folder.mkdir(exist_ok=True)
             (folder/"track-analysis-v1.json").write_text(json.dumps({"audio_sha256":t,"analysis_cache_key":t,
@@ -155,11 +166,11 @@ class PerformanceActionsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"does not match"):
                 transition.resolve_plan(root/"plan.json",root)
 
-    def execute_fake(self, root, *, source=1, takeover_at=None, cancel_at=None, missing_mapping=False):
-        plan,resolved=self.build_plan(root,source)
+    def execute_fake(self, root, *, source=1, takeover_at=None, cancel_at=None, missing_mapping=False, in_track=None, clean=False):
+        plan,resolved=self.build_plan(root,source,in_track,clean)
         target=3-source
         clock=[0.0];last=[0.0];calls=[]
-        state={source:{"pos":44.0,"rate":1.0,"play":True,"bpm":120},target:{"pos":0.,"rate":1.,"play":False,"bpm":140}}
+        state={source:{"pos":resolved['deck_a_start_seconds'],"rate":1.0,"play":True,"bpm":120},target:{"pos":0.,"rate":1.,"play":False,"bpm":140}}
         def advance():
             dt=clock[0]-last[0]
             for d in state.values():
@@ -226,6 +237,32 @@ class PerformanceActionsTest(unittest.TestCase):
             self.assertFalse(state[2]["play"])
             self.assertGreater(state[1]["rate"],1.0)
             self.assertLess(state[1]["rate"],130/120)
+
+    def test_in_track_actions_execute_before_transition_on_both_decks_and_cut(self):
+        for fn in ('bass_pulse','bass_reveal','volume_duck'):
+            for source in (1,2):
+                for clean in (False,True):
+                    with self.subTest(fn=fn,source=source,clean=clean), TemporaryDirectory() as raw:
+                        action={'function':fn,'track_id':'a'*64,'start_beat':48,'duration_beats':16,'depth':.25}
+                        state,calls=self.execute_fake(Path(raw),source=source,in_track=[action],clean=clean)
+                        control,baseline=('volume',.75) if fn=='volume_duck' else ('bass',.5)
+                        shaping=[c for c in calls if c[:2]==(control,str(source)) and c[3] <= 12.1]
+                        self.assertTrue(any(c[2] < baseline-.05 for c in shaping))
+                        self.assertAlmostEqual(shaping[-1][2],baseline)
+                        self.assertTrue(state[3-source]['play'])
+                        self.assertFalse(state[source]['play'])
+                        log=next(Path(raw).glob('runs/*/transition-events.jsonl')).read_text()
+                        self.assertIn('in_track_action_completed',log)
+
+    def test_in_track_cancel_restores_control_but_takeover_writes_nothing(self):
+        action={'function':'volume_duck','track_id':'a'*64,'start_beat':48,'duration_beats':16,'depth':.25}
+        for takeover in (False,True):
+            with TemporaryDirectory() as raw:
+                state,calls=self.execute_fake(Path(raw),in_track=[action],**({'takeover_at':8} if takeover else {'cancel_at':8}))
+                self.assertTrue(state[1]['play'])
+                self.assertFalse(state[2]['play'])
+                if takeover:self.assertEqual(calls[-1],('takeover',))
+                else:self.assertEqual(calls[-1][:3],('volume','1',.75))
 
 
 if __name__=="__main__":unittest.main()

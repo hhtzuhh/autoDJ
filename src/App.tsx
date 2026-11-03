@@ -4,6 +4,7 @@ import { CrowdWebcam } from "./CrowdWebcam";
 import { useEffect, useMemo, useState } from "react";
 import { event, initialState, tracks } from "./demo";
 import { RollingPlanner } from "./MetaActivity";
+import { InTrackActions } from "./InTrackActions";
 import { CrowdObservation } from "./CrowdObservation";
 import type {
   CopilotState,
@@ -220,7 +221,7 @@ function TrackMini({ track }: { track: Track }) {
 }
 
 function PlanDetails({ plan }: { plan: Partial<Pick<TransitionPlan,
-  "technique" | "sourceCueBeat" | "sourceExitBeat" | "targetEntryBeat" | "transitionMode" | "bars" | "confidence" | "performanceActions">> }) {
+  "technique" | "sourceCueBeat" | "sourceExitBeat" | "targetEntryBeat" | "transitionMode" | "bars" | "confidence" | "performanceActions" | "inTrackActions">> }) {
   return <div className="plan-detail-content">
     <h3>Transition</h3>
     <dl className="plan-detail-grid">
@@ -246,6 +247,7 @@ function PlanDetails({ plan }: { plan: Partial<Pick<TransitionPlan,
         {action.fade_out_seconds != null && ` · fade ${action.fade_out_seconds}s`}
       </li>)}</ul>
     </> : <p className="panel-details__note">No action details recorded for this transition.</p>}
+    <InTrackActions actions={plan.inTrackActions} />
   </div>;
 }
 
@@ -298,6 +300,7 @@ function PlanPanel({ state }: { state: CopilotState }) {
         <TrackMini track={target} />
       </div>
 
+      <div className="plan-action-heading">Transition · song handoff</div>
       {actions.length > 0 && <ol className="performance-timeline" aria-label="Selected transition actions">
         {actions.map((action, index) => <li key={index}>
           <span className="performance-timeline__stage">{action.start_beat < 0 ? "Before handoff" : action.start_beat === 0 ? "Handoff" : action.function === "ramp_tempo" ? "After blend" : "During blend"}</span>
@@ -305,6 +308,7 @@ function PlanPanel({ state }: { state: CopilotState }) {
           <small>{action.duration_beats != null ? `${action.duration_beats / 4} bars` : action.fade_out_seconds ? `${action.fade_out_seconds}s fade` : "Direct handoff"}</small>
         </li>)}
       </ol>}
+      <InTrackActions actions={state.plan.inTrackActions} />
 
       <div className="decision-card">
         <div className="decision-card__icon"><Icon name="spark" /></div>

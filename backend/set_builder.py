@@ -24,6 +24,7 @@ from meta_planner import MetaConfig, MetaOutputLimitError, OpenAICompatibleTrans
 from pair_analyzer import PAIR_VERSION
 from transition_techniques import TECHNIQUES
 from performance_actions import ACTION_CATALOG, tempo_bounds
+from in_track_actions import IN_TRACK_CATALOG
 from transition_pipeline import AnalysisCatalog, PairAnalysisCache, adjacent_pairs, utc_now
 from music_features import MusicFeatures
 from playlist_import import preview_playlist
@@ -951,6 +952,7 @@ class SetBuilderService:
                 "catalogCount": len(self.catalog),
                 "techniques": [{"id": name, **spec} for name, spec in TECHNIQUES.items()],
                 "actionCatalog": ACTION_CATALOG,
+                "inTrackCatalog": IN_TRACK_CATALOG,
                 "library": [{**row.public(), "musicFeatures": json.loads(json.dumps(self.music_results.get(t, {"status": "pending"}))), "analysisStatus": self.state["trackStatuses"].get(t, row.analysis_status),
                              "analysisOrigin": self.state.get("analysisOrigins", {}).get(t, "unknown"),
                              "analysisRun": json.loads(json.dumps(self.state.get("analysisRuns", {}).get(t)))} for t, row in self.catalog.items()],

@@ -2,6 +2,8 @@ import {useEffect, useRef, useState} from "react";
 import type {CopilotState} from "./types";
 import type {BuildResult} from "./playlistRequest";
 import {PreparedPlaylistImport} from "./PreparedPlaylistImport";
+import {InTrackActions, inTrackLabels} from "./InTrackActions";
+import type {InTrackAction} from "./types";
 
 export function TransitionSetupDialog({open, onClose, state, disabled, onAction}: {
   open: boolean; onClose: () => void; state: CopilotState; disabled: boolean;
@@ -47,7 +49,7 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
         }</p></li>)}
       </ul>
       {!b?.techniques?.length && <p className="flow-empty">Technique catalog unavailable. Connect to the live service to load it.</p>}
-      <p className="flow-section__note">Tempo ramps can prepare or finish a transition. Independent in-track performance actions are not implemented yet. Musical quality still needs listening.</p>
+      <p className="flow-section__note">Transition actions handle the song change, including tempo preparation and recovery. Musical quality still needs listening.</p>
       <details className="panel-details"><summary>Technical details · action functions{b?.actionCatalog ? ` (${Object.keys(b.actionCatalog).length})` : ""}</summary>
         <p>These functions implement the techniques above. Meta returns one action list per transition; EQ actions are optional and tempo ramps are required when the selected common BPM changes a song’s speed.</p>
         <ul className="transition-catalog__mapping">
@@ -58,6 +60,14 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
         </ul>
         {b?.actionCatalog && Object.entries(b.actionCatalog).map(([name, a]) => <p key={name}><strong><code>{name}</code></strong> · {a.purpose} {a.timing} <small>{a.tradeoff}</small></p>)}
       </details>
+    </details>
+    <details className="transition-catalog">
+      <summary>Optional in-track actions{b?.inTrackCatalog ? ` (${Object.keys(b.inTrackCatalog).length})` : ""}</summary>
+      <p>Shape one song while it plays alone. Meta can choose none, or up to two actions per outgoing song in the same planning call. These finish before transition preparation; the final song becomes eligible when its outgoing transition is planned.</p>
+      {b?.inTrackCatalog ? <ul className="transition-catalog__techniques">
+        {Object.entries(b.inTrackCatalog).map(([name, a]) => <li key={name}><strong>{inTrackLabels[name as InTrackAction["function"]] ?? name}</strong><p>{a.purpose}</p><p>{a.tradeoff}</p></li>)}
+      </ul> : <p className="flow-empty">Restart the updated bridge to load the in-track action catalog.</p>}
+      <p className="flow-section__note">In-track timing uses absolute song beats. Actions reduce low EQ or channel volume and restore the executor baseline; they do not loop, seek, or change playback speed.</p>
     </details>
     <ol className="set-setup-steps">
       <li><strong>Prepare adjacent transitions</strong><p>Reuse local analysis and pair caches for each neighboring song. This does not call Meta or start playback.</p>
@@ -76,7 +86,9 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
           {performance.transitions.map((edge, index) => <div key={index} className="set-setup-edge"><div>
             <strong>{title(edge.source_track_id)} → {title(edge.target_track_id)}</strong>
             <p>Exit beat {edge.source_exit_beat_index} → entry beat {edge.target_entry_beat_index} · {edge.transition_bars} bars · {edge.technique.replaceAll("_", " ")}{edge.routine?.common_bpm != null ? ` · common ${edge.routine.common_bpm} BPM` : ""}</p>
+            <h4>Transition actions · handoff-relative beats</h4>
             <ul>{edge.routine?.actions.map((action, i) => <li key={i}><code>{action.function}</code> · {action.deck ? `${action.deck} · ` : ""}beat {action.start_beat}{action.duration_beats != null ? ` · ${action.duration_beats} beats` : ""}{action.target_bpm != null ? ` · ${action.target_bpm} BPM` : ""}{action.curve ? ` · ${action.curve}` : ""}{action.fade_out_seconds != null ? ` · fade ${action.fade_out_seconds}s` : ""}</li>)}</ul>
+            <InTrackActions actions={edge.routine?.in_track_actions} />
           </div></div>)}
           <small>Action offsets are relative to the handoff cue (beat 0); negative beats happen before it. This is a plan, not a completed performance.</small>
         </div> : null}

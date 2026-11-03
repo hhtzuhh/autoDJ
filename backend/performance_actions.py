@@ -217,7 +217,7 @@ def compile_routine(plan: dict, edge: dict, routine: dict) -> dict:
             mix["bass_swap"] = {"start_beat": action["start_beat"], "end_beat": action["start_beat"] + action["duration_beats"]}
         elif action["function"] == "bass_dip":
             mix["bass_dip_range"] = {"start_beat": action["start_beat"], "end_beat": action["start_beat"] + action["duration_beats"]}
-    plan["tempo_routine"] = {k: v for k, v in routine.items() if k not in {"actions", "technique"}}
+    plan["tempo_routine"] = {k: v for k, v in routine.items() if k not in {"actions", "technique", "in_track_actions"}}
     start = edge["source_exit_beat_index"] - routine["pre_beats"]
     plan["automation_start_beat_index"] = start
     plan["deck_a"]["play_start_beat_index"] = max(0, start - 8)
