@@ -23,24 +23,136 @@ The Muse Spark node can also run independently; its descriptions remain unverifi
 The resulting status is `selected`, with no pair jobs, post-curation transition
 calls, export readiness or automatic playback. Saved selections can be loaded
 without invoking Meta. Continue explicitly with **Prepare transitions → Export Mixxx
-playlist → Start set**. Prepare preserves the selected order, checks pair-cache
+playlist → Build performance plan → Start playback**. Prepare preserves the selected order, checks pair-cache
 identities, and computes adjacent candidates without another curation call. It
 supports existing clean-break candidates where beat-sync blending is unavailable.
 No candidate or failed pair keeps Export disabled. Retrying preserves successful
 on-disk caches. Preparation survives a bridge restart; a new Build or saved-set
 load returns to selection, requiring preparation again.
 
-Export writes a playlist under `artifacts/live-performance/`. Import/open it in
-Mixxx and select its first song. Start verifies staged song identities, requires
-an initial Meta plan, then starts Deck 1. An unsuccessful initial plan leaves the
+Export writes `prepared-tonight-set-YYYYMMDD-HHMMSS-<5-char-hash>.m3u8` under
+`artifacts/live-performance/`, using local time and a five-character SHA-256 prefix
+of the exported queue record. Its manifest shares the same name. Import/open it in
+Mixxx and select its first song. Build performance plan stages and verifies song
+identities, calls Meta for the first window (up to four songs / three handoffs),
+and displays its cues, actions, parameters, and reason with both decks stopped.
+Start playback uses that reviewed plan without another initial model call.
+It rejects changes to the preparation/export, active queue, plan, loaded identities,
+analysis keys or cue positions. Rebuilding is required after a bridge restart or
+cancellation. Pending review cannot arm or start background replenishment. Later
+windows are planned during playback. An unsuccessful initial plan leaves the
 decks stopped. A changed preparation revision invalidates an older export even
-if the song order is unchanged. Auto arm remains a separate explicit control;
-with it off, approve and arm handoffs manually. The previous automatic
+if the song order is unchanged. Auto arm is fixed on for this demo and enabled
+by every successful Start playback. Cancel/takeover still suspend automation;
+cancelled plans require explicit recovery or a new reviewed build. The previous automatic
 `prepare_transitions=True` service mode remains covered as a legacy internal path.
 The new UI path was checked with a real three-song selected set: both adjacent
 pairs produced 25 clean-break candidates and the playlist exported successfully.
 Both decks remained stopped. Initial-plan gating is tested with synthetic MIDI;
-a new real playback run through this reconnected flow is still pending.
+the operator reported successful E2E playback on November 3. A recorded audio
+acceptance run is still pending. Set preparation controls live in Agent flow;
+Control room focuses on the live decks, queue, plans, events and takeover.
+
+### Restore a previously prepared playlist
+
+In **Prepare & start your set → Step 2: Export or import a prepared playlist**,
+choose an earlier UTF-8 `.m3u8` / `.m3u`. Preview matches songs against the fixed
+local library. **Import playlist & restore transitions** restores the order,
+validates/reuses each adjacent pair cache, and recreates the prepared activation.
+Step 3 **Build performance plan** then becomes available without manually running
+Step 1 or exporting again. Meta is first called in Step 3; import never plays audio.
+
+The M3U contains paths and order. Its transition candidates are stored separately
+in this project's local cache, bound to both analysis keys and the pair version.
+Missing/outdated pair caches are rebuilt locally; missing song analyses or zero
+valid candidates block import. This restores candidate preparation, not a previous
+Meta performance plan. Opening/selecting the playlist in Mixxx remains manual.
+
+Import supports 2–50 unique songs and files up to 32 KB. Absolute paths must
+match `local-assets/samples/`; local `file://` URLs are decoded, and relative
+paths resolve from that folder. Missing songs, remote URLs and repeats block the
+whole import. Preview does not change selection; confirmation rechecks the library.
+The Agent flow identifies restored playlists as manual imports, not AI selections.
+
+### Parameterized performance actions
+
+Prepare generates cue pairs and feasible modes. The current Meta planning window
+now receives an executable action catalog, local DSP evidence, and cached Muse
+whole-song descriptions (explicitly unverified and not cue-specific). Meta chooses
+cue candidates and parameterized actions for **each** transition in one call;
+choices survive buffer promotion and crowd replanning. Each function documents
+its purpose, exact parameters, timing, and musical tradeoffs. Playback
+embellishments are optional; every edge needs exactly one handoff. Missing,
+unknown, conflicting, or out-of-bounds actions are rejected, not silently replaced.
+
+| Technique | Executor behavior |
+| --- | --- |
+| Crossfade | Linear beat-synced blend over the selected bars. |
+| Bass swap | Linear blend with gradual exchange of low EQ over model-selected beats. |
+| Bass dip | Remove outgoing low EQ in the first half of the selected interval, restore incoming low EQ in the second half. |
+| Late cut | Start target in sync but hidden; crossfade over the final beat. The entry cue is a silent lead-in, not an inferred drop. |
+| Clean cut | Start target, cut fader, stop source at native tempos. |
+| Fade out cut | At the exit cue, fade source to silence over 0.5 s while target remains stopped, then start target at its entry. |
+
+Tempo-compatible pairs retain both blend and cut alternatives. The pair-cache
+version changed; Prepare recomputes stale pairs without rerunning song analysis.
+New action windows use a common BPM within the intersection of each deck's ±20%
+playback range. `ramp_tempo` ends the source ramp at the handoff and returns the
+target to native tempo after the mix. For example, 120 → 140 can meet at 130 BPM.
+Ramps are 8–128 beats, limited to 2.5% change per bar. Middle tracks must retain
+32 beats between routines. This first version requires a return to native tempo;
+it does not carry an altered tempo indefinitely across songs. `crossfade` accepts
+a linear or late-cut curve; `bass_swap` / `bass_dip` accept an interval within the
+mix; `cut_to_next` accepts a direct cut or a 0.5-second outgoing fade. Older plans
+remain readable through the legacy executor. Echo, filter, and loop automation
+are not available functions.
+
+The executor still lives in sibling `experiments/time-map/routine_executor.py`.
+It follows observed file position, not a fixed wall-clock BPM timer, and requires
+Mixxx mapping protocol 2. It verifies playback-rate readback without changing file
+BPM metadata. Cancellation preserves the audible deck's current tempo; human
+takeover stops further controls. A missing mapping blocks execution. This path
+still needs a recorded, audible Mixxx acceptance run; passing parameter checks
+does not establish beat alignment or musical quality.
+
+November 3 live regression: the first routine completed, but the second armed
+routine hung while closing a MIDI input. A native process sample showed the
+CoreMIDI close/Python callback GIL deadlock. Feedback now uses native queued
+polling without Python callbacks, and a routine reuses one input. A real 600-read,
+30-session check at 20 ms request spacing passed without playback commands;
+an unpaced stress attempt timed out. The operator subsequently reported successful
+E2E playback on November 3. This is user-reported acceptance, not an independently
+recorded measurement of beat alignment, latency or musical quality.
+
+Action planning has a separate `META_ACTION_MAX_TOKENS` budget (default 4096,
+including reasoning); ordinary candidate-only requests retain `META_MAX_TOKENS`
+(2048). Truncated responses are rejected. A real 2048-token action request reached
+the output limit and was rejected. Local raw requests/results, including failures,
+stay in ignored `artifacts/routine-validation/`.
+Ramp prompts include directional minimum-duration calculations and example BPMs;
+examples still require runway, audio-length and whole-window dwell validation.
+Prompts include exact flat JSON action shapes and per-function required keys.
+During a stopped Build only, a rejected action window gets at most one additional
+Meta correction request containing the invalid output and validation error. Both
+attempts remain visible; the corrected whole window must pass the same checks.
+Live background planning does not gain an extra retry or latency budget. Raw
+request bodies and responses are saved under ignored
+`artifacts/live-performance/meta-calls/<request-id>/`, without authorization headers.
+Exact 2.5%-per-bar boundaries tolerate floating-point noise, while shorter ramps
+remain rejected. Build failures now surface the detailed validation error.
+On November 3, an initial window was rejected for exceeding the ramp limit. After
+these changes, a real three-song Build performance plan succeeded with both decks
+stopped; this verifies planning, not audible transition quality.
+With the 4096-token budget, a real Spark 1.3 call returned two valid routines in
+29.79 seconds: 100 → common 120 → 140 BPM, then 140 → common 161 → 182 BPM.
+Both used a 16-beat linear crossfade and omitted optional low-EQ actions. This
+verified model output and local validation only; it did not start playback.
+
+Verification includes synthetic speed-aware MIDI execution in both deck
+directions, per-edge promotion, custom EQ intervals, overlapping-routine rejection,
+cancel/takeover, and native-tempo recovery. The installed mapping was verified
+with both decks stopped: requested ratios 1.08333 and 0.92857 produced the expected
+BPM readings and were restored to 1.0. No playback was started by that probe.
 
 - Implemented here: responsive React/TypeScript control-room UI, typed state
   contract, queue/Deck/plan/event views, deterministic adjacent-pair analysis,
@@ -66,17 +178,17 @@ a new real playback run through this reconnected flow is still pending.
   selector and native-tempo executor compile them into a target-start →
   fader-cut → source-stop handoff; they never enter the beat-sync crossfade
   compiler.
-- Safe set activation is split into two explicit stages. **Export Mixxx playlist**
-  writes a hash-verified playlist without mutating the active queue. After the
-  operator opens it and selects its first row, **Start set** requires both
-  Decks stopped, verifies the first two full audio identities, obtains the
-  first Meta plan, atomically promotes the queue, and starts Deck 1. The plan
-  remains unarmed until **Approve & arm**. This path has automated coverage but
-  has not yet completed a live ten-track Mixxx acceptance run.
+- Set activation has separate **Export Mixxx playlist**, **Build performance plan**,
+  and **Start playback** actions. Build loads/validates songs and plans the first
+  rolling window without starting audio. Start rechecks the reviewed plan's bindings
+  and plays Deck 1 with Auto arm enabled; later rolling windows are planned during playback.
+  Cancel and takeover remain authoritative. Synthetic tests cover this split,
+  failure, cancellation and stale plans. The operator reported successful E2E playback
+  on November 3; a recorded acceptance run with audio measurements is still pending.
 - The live bridge exposes separate **Plan with Meta** and **Approve & arm**
   actions. Planning makes one model request, validates the returned candidate
-  locally, and never writes to Mixxx. Arming remains a distinct human action
-  behind the existing lifecycle preflight and executor.
+  locally, and never writes to Mixxx. Automatic and manual arming both use
+  the existing lifecycle preflight and executor; reviewed builds wait for Start playback.
 - Queue transition labels now distinguish analyzed candidates from execution
   readiness. `Standby ready` means a deterministic emergency candidate exists
   but no Meta plan is armed; `Plan ready`, `Armed`, and `Executing` are separate
@@ -159,7 +271,7 @@ Validate → Execute → Verify loop, and optional webcam feedback into future
 plans. Select a node to inspect its reported evidence. The request ledger
 shows retained model-call status, latency and token usage where available.
 
-The preparation nodes run **Local library → Analyze library → Muse Spark music features → Select & order → Prepare transitions → Export playlist → Start set**.
+The preparation nodes run **Local library → Analyze library → Muse Spark music features → Select & order → Prepare transitions → Export playlist → Build performance plan → Start playback**.
 Click **Local library** to open all scanned songs with artist, file-tag genre,
 and duration. Click **Analyze library** to inspect Ready / Not ready / Analyzing /
 Failed counts and individual results. Check individual songs or **Select all songs**,

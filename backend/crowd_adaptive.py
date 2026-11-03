@@ -208,7 +208,7 @@ class CrowdAdaptiveMixin:
             if not orders: raise ValueError('No future track remains.')
             candidates = []
             intent = 'impact_at_handoff' if evidence['goal'] == 'build' else 'maintain_energy'
-            minimum = int(active['deck_b']['cue_beat_index']) + int(active['mix']['bars']) * 4 + MINIMUM_DWELL_BEATS
+            minimum = int(active['deck_b']['cue_beat_index']) + int(active['mix'].get('bars', 0)) * 4 + int(active.get('tempo_routine', {}).get('post_beats', 0)) + MINIMUM_DWELL_BEATS
             cache = PairAnalysisCache(self.data_root / 'artifacts/live-performance/crowd-pairs', self.analysis_catalog)
             for order in orders:
                 window = tuple(order[index:index + 4])
@@ -231,7 +231,8 @@ class CrowdAdaptiveMixin:
                 'policy': 'Follow visible movement intensity, not presumed enjoyment. Build favors measured energy/impact; ease favors smoother/lower-impact options. Keep order when no supported improvement exists. Select only supplied candidate IDs. Each candidate carries its own track order. Bass swap is available only for beat-sync crossfades. Do not change the currently locked transition.'}
             selection = select_with_meta(candidates, queue_revision=old_queue['revision'], intent=intent,
                 track_ids=tuple(ids[index:index+4]), model=config.model,
-                transport=self._meta_transport(config, meta_call), crowd_context=context_data)
+                transport=self._meta_transport(config, meta_call), crowd_context=context_data,
+                track_context=self._planning_track_context(tuple(ids)))
             self._finish_meta_call(meta_call)
             completed_call = meta_call
             meta_call = None
@@ -260,9 +261,9 @@ class CrowdAdaptiveMixin:
                 decision = dict(reason=selection.decision.reason, model=config.model,
                     before=ids, after=selected_order, queueChanged=selected_order != ids, lockedThrough=index,
                     sourceTrack=selection.candidate['window_track_ids'][0], targetTrack=selection.candidate['window_track_ids'][1],
-                    technique=compiled['transition_buffer'][0]['mode'],
+                    technique=compiled['transition_buffer'][0]['technique'],
                     bassSwap=bool(compiled['next_executable_plan']['mix'].get('bass_swap')),
-                    bars=compiled['next_executable_plan']['mix']['bars'],
+                    bars=compiled['next_executable_plan']['mix'].get('bars', 0),
                     planId=compiled['next_executable_plan']['plan_id'], observationId=evidence['jobId'])
                 self.crowd.update(status='staged', reason='Waiting for the current transition to complete; no playback change yet.', decision=decision)
                 self._crowd_record('staged', {'decision': decision, 'evidence': evidence, 'compiled': compiled})
@@ -301,7 +302,7 @@ class CrowdAdaptiveMixin:
             if (not envelope or envelope.status != 'completed' or self._executor_running()
                 or source_deck.track_id != source_id or source_deck.play is not True
                 or perf.decks[recycled_deck].play is True or source_deck.beat_index is None
-                or int(plan['deck_a']['transition_start_beat_index']) <= int(source_deck.beat_index) + 16
+                or int(plan.get('automation_start_beat_index', plan['deck_a']['transition_start_beat_index'])) <= int(source_deck.beat_index) + 16
                 or self.auto_chain_cancel.is_set()):
                 self.crowd_pending = None
                 self.crowd.update(status='hold', reason='Fresh playback checks rejected the staged change.')

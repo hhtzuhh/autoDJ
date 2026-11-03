@@ -5,6 +5,7 @@ import unittest
 
 from set_builder import SetBuilderService
 from test_set_builder import metadata, write_analyzed_library
+from pair_analyzer import PAIR_VERSION
 
 
 class SavedSetsTest(unittest.TestCase):
@@ -52,3 +53,18 @@ class SavedSetsTest(unittest.TestCase):
             song=s.catalog[ident].path;song.rename(song.with_suffix('.removed'))
             with self.assertRaisesRegex(ValueError,'no longer available'):
                 s.load_saved_set(saved['id'])
+
+    def test_old_pair_version_preserves_saved_song_selection_and_reprepares(self):
+        with TemporaryDirectory() as raw:
+            root=Path(raw);s=self.service(root);saved=s.saved_sets()[0]
+            path=s.saved_root/(saved['id']+'.json')
+            record=json.loads(path.read_text())
+            record['state']['pairAnalysisVersion']='cue-pair-v5'
+            path.write_text(json.dumps(record))
+            selected=list(s.state['orderedTrackIds'])
+            s.load_saved_set(saved['id'])
+            self.assertEqual(s.state['pairAnalysisVersion'],PAIR_VERSION)
+            self.assertEqual(s.state['orderedTrackIds'],selected)
+            self.assertFalse(s.state['activationReady'])
+            self.drain(s)
+            self.assertEqual(s.snapshot()['status'],'ready')

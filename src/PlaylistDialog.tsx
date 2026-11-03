@@ -6,6 +6,7 @@ import type {BuildResult} from "./playlistRequest";
 type SavedSet = {id: string; savedAt: string; prompt: string; trackCount: number;
   tracks: {id: string; title: string}[]; available: boolean; reason: string | null};
 
+
 export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
   open: boolean; onClose: () => void; state: CopilotState; disabled: boolean;
   onBuild: (prompt: string, count: number) => Promise<BuildResult>;

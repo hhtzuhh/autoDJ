@@ -230,7 +230,8 @@ class SetBuilderTest(unittest.TestCase):
             self.assertEqual(len(state["transitions"]), 3)
             self.assertTrue(all(edge["status"] == "analyzed" for edge in state["transitions"]))
             self.assertTrue(all(edge["candidateCount"] > 0 for edge in state["transitions"]))
-            self.assertTrue(all(edge["reason"] == "clean_break_required" for edge in state["transitions"]))
+            # Shared-tempo candidates now bridge these synthetic BPM gaps.
+            self.assertTrue(all(edge["reason"] is None for edge in state["transitions"]))
 
 
 if __name__ == "__main__":

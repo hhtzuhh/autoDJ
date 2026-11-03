@@ -18,7 +18,7 @@ function FlowStep({item, number, selected, onSelect}: {item: FlowNode; number: n
     {item.id === "library" && <span className="flow-node__action">View all songs ↗</span>}
     {item.id === "analysis" && <span className="flow-node__action">Review / analyze songs ↗</span>}
     {item.id === "music" && <span className="flow-node__action">Call Spark / inspect results ↗</span>}
-    {["pairs", "export", "start"].includes(item.id) && <span className="flow-node__action">Prepare / export / start ↗</span>}
+    {["pairs", "export", "performance", "start"].includes(item.id) && <span className="flow-node__action">Prepare / plan / play ↗</span>}
     {item.id === "curation" && <span className="flow-node__action">Build / choose playlist ↗</span>}
     <span className="flow-node__status">{item.label}</span>
   </button>;
@@ -30,7 +30,7 @@ function Lane({nodes, selected, setSelected, name}: {nodes: FlowNode[]; selected
 }
 const time = (at: number) => Number.isFinite(at) ? new Date(at).toLocaleTimeString([], {hour12: false}) : "—";
 
-export function AgentFlow({state, webcam, disconnected, active, disabled, onBuild, onAnalyze, onDescribeMusic, onSetAction}: {state: CopilotState; webcam: WebcamFlowState | null; disconnected: boolean; active: boolean; disabled: boolean; onBuild: (prompt: string, count: number) => Promise<BuildResult>; onAnalyze: (trackIds: string[]) => Promise<BuildResult>; onDescribeMusic: (trackIds: string[]) => Promise<BuildResult>; onSetAction: (action: "prepare-transitions" | "activate" | "start") => Promise<BuildResult>}) {
+export function AgentFlow({state, webcam, disconnected, active, disabled, onBuild, onAnalyze, onDescribeMusic, onSetAction}: {state: CopilotState; webcam: WebcamFlowState | null; disconnected: boolean; active: boolean; disabled: boolean; onBuild: (prompt: string, count: number) => Promise<BuildResult>; onAnalyze: (trackIds: string[]) => Promise<BuildResult>; onDescribeMusic: (trackIds: string[]) => Promise<BuildResult>; onSetAction: (action: "prepare-transitions" | "activate" | "build-performance" | "start") => Promise<BuildResult>}) {
   const [selected, setSelected] = useState("analysis");
   const [setupOpen, setSetupOpen] = useState(false);
   const [musicOpen, setMusicOpen] = useState(false);
@@ -38,7 +38,7 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
   const [libraryPanel, setLibraryPanel] = useState<"library" | "analysis" | null>(null);
   const selectNode = (id: string) => {
     setSelected(id);
-    if (["pairs", "export", "start"].includes(id)) setSetupOpen(true);
+    if (["pairs", "export", "performance", "start"].includes(id)) setSetupOpen(true);
     if (id === "music") setMusicOpen(true);
     if (id === "curation") setPlaylistOpen(true);
     if (id === "library" || id === "analysis") setLibraryPanel(id);
@@ -64,7 +64,7 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
       <div><span>Prepared tracks</span><strong>{state.dataSource === "live" && !disconnected ? state.setBuilder?.queue.length ?? "—" : "—"}</strong><small>Selection, not playback</small></div>
       <div><span>Model calls in flight</span><strong>{flow.inFlight ?? "—"}</strong><small>Observed requests only</small></div>
       <div><span>Handoffs completed</span><strong>{flow.completed ?? "—"}</strong><small>This bridge session</small></div>
-      <div><span>Execution mode</span><strong className="flow-summary__mode">{flow.fresh ? state.autoArmEnabled ? "Auto arm" : "Human approval" : "Unverified"}</strong><small>Human takeover stays authoritative</small></div>
+      <div><span>Execution mode</span><strong className="flow-summary__mode">{flow.fresh ? state.autoArmEnabled ? "Auto arm" : "Automation suspended" : "Unverified"}</strong><small>Human takeover stays authoritative</small></div>
     </div>
     <div className="flow-legend" aria-label="Node status legend">
       {[["running", "Working"], ["done", "Complete / available"], ["waiting", "Waiting"], ["error", "Failed / blocked"], ["idle", "Idle / no evidence"]].map(([kind, label]) =>
@@ -74,7 +74,7 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
     <section className="flow-section" aria-labelledby="preparation-flow-title">
       <div className="flow-section__heading"><div><span className="flow-section__index">01</span><h2 id="preparation-flow-title">Analyze first, then select</h2></div><span>Library → All-In-One + DSP → Muse Spark → Select & order</span></div>
       <Lane nodes={flow.preparation} selected={selected} setSelected={selectNode} name="prepare" />
-      <p className="flow-section__note">Build completes local analysis, then Muse Spark music descriptions for the entire library before selecting songs. Existing results are reused; either stage can also run separately. After selection, prepare adjacent transition candidates, export the playlist, then start the set explicitly.</p>
+      <p className="flow-section__note">Build completes local analysis, then Muse Spark music descriptions for the entire library before selecting songs. Existing results are reused; either stage can also run separately. After selection, prepare adjacent transition candidates, export the playlist, build and review the first performance window, then start playback explicitly.</p>
 
     </section>
     <section className="flow-section flow-section--loop" aria-labelledby="live-flow-title">

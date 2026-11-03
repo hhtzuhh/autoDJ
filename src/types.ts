@@ -128,6 +128,9 @@ export interface TransitionPlan {
   targetEntryPosition: number;
   bars: number;
   transitionMode?: "beat_sync_crossfade" | "clean_break";
+  technique?: string;
+  performanceActions?: {function: string; start_beat: number; duration_beats?: number; target_bpm?: number; deck?: string; curve?: string; fade_out_seconds?: number}[];
+  tempoRoutine?: {common_bpm: number; source_native_bpm: number; target_native_bpm: number; pre_beats: number; post_beats: number} | null;
   intent: string;
   confidence: number;
   reason: string;
@@ -170,6 +173,7 @@ export interface TransitionPlan {
   futurePlanStatus?: "idle" | "planning" | "ready" | "degraded";
   futurePlanningWindowTrackIds?: string[];
   followingDraft?: {
+    technique?: string | null;
     sourceTrackId: string;
     targetTrackId: string;
     sourceExitBeat: number;
@@ -201,7 +205,19 @@ export interface CopilotState {
   events: PerformanceEvent[];
   flowTelemetry?: LiveFlowTelemetry;
   setBuilder?: {
+    techniques?: {id: string; mode: string; description: string; tradeoff: string}[];
+    actionCatalog?: Record<string, {purpose: string; parameters: Record<string, unknown>; timing: string; tradeoff: string; optional: boolean}>;
+    performancePlan?: {
+      status: "idle" | "building" | "ready" | "stale" | "failed" | "started";
+      error?: string | null;
+      planId?: string;
+      model?: string;
+      reason?: string;
+      trackIds?: string[];
+      transitions?: {source_track_id: string; target_track_id: string; source_exit_beat_index: number; target_entry_beat_index: number; transition_bars: number; technique: string; routine?: {common_bpm?: number; actions: {function: string; start_beat: number; duration_beats?: number; target_bpm?: number; deck?: string; curve?: string; fade_out_seconds?: number}[]}}[];
+    };
     selectionOnly?: boolean;
+    selectionSource?: {kind: "mixxx_playlist"; filename: string};
     preserveSelectedOrder?: boolean;
     transitionsRequested?: boolean;
     buildPhase?: "music_features" | "analysis_only" | "library_ready" | "library_analysis" | "curation" | "selection_complete" | "transitions";

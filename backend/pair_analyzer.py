@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from statistics import mean
 from typing import Any
+from performance_actions import tempo_bounds
 
 
-PAIR_VERSION = "cue-pair-v5"
+PAIR_VERSION = "cue-pair-v7"
 MAX_TEMPO_CHANGE_FRACTION = 0.06
 TRANSITION_BAR_OPTIONS = (2, 4, 8)
 
@@ -146,7 +147,8 @@ def build_pairs(
     source_bpm = float(source["rhythm"]["bpm"])
     target_bpm = float(target["rhythm"]["bpm"])
     target_tempo_change = source_bpm / target_bpm - 1.0
-    tempo_compatible = abs(target_tempo_change) <= MAX_TEMPO_CHANGE_FRACTION
+    shared_tempo = tempo_bounds(source_bpm, target_bpm)
+    tempo_compatible = shared_tempo is not None
     source_bar_seconds = _median_bar_seconds(source)
     target_bar_seconds = _median_bar_seconds(target)
     pairs: list[dict[str, Any]] = []
@@ -171,34 +173,34 @@ def build_pairs(
             lengths = sorted(source_lengths & target_lengths)
             if not lengths:
                 continue
+            clean_break_pairs.append(
+                {
+                    "a_exit": {
+                        "rank": int(exit_candidate["rank"]),
+                        "beat_index": int(exit_candidate["beat_index"]),
+                        "time_seconds": float(exit_candidate["time_seconds"]),
+                        "score": float(exit_candidate["score"]),
+                    },
+                    "b_entry": {
+                        "rank": int(entry_candidate["rank"]),
+                        "beat_index": int(entry_candidate["beat_index"]),
+                        "time_seconds": float(entry_candidate["time_seconds"]),
+                        "score": float(entry_candidate["score"]),
+                    },
+                    "transition_mode": "clean_break",
+                    "handoff_options": ["phrase_boundary_cut"],
+                    "transition_bar_options": [],
+                    "transition_metrics_by_bars": {},
+                    "b_tempo_change_fraction": target_tempo_change,
+                    "best_strategy_for_two_bars": "clean_break",
+                    "heuristic_score": float(
+                        0.45 * float(exit_candidate["score"])
+                        + 0.45 * float(entry_candidate["score"])
+                        + 0.10 * float(entry_candidate.get("boundary_change", 0.0))
+                    ),
+                }
+            )
             if not tempo_compatible:
-                clean_break_pairs.append(
-                    {
-                        "a_exit": {
-                            "rank": int(exit_candidate["rank"]),
-                            "beat_index": int(exit_candidate["beat_index"]),
-                            "time_seconds": float(exit_candidate["time_seconds"]),
-                            "score": float(exit_candidate["score"]),
-                        },
-                        "b_entry": {
-                            "rank": int(entry_candidate["rank"]),
-                            "beat_index": int(entry_candidate["beat_index"]),
-                            "time_seconds": float(entry_candidate["time_seconds"]),
-                            "score": float(entry_candidate["score"]),
-                        },
-                        "transition_mode": "clean_break",
-                        "handoff_options": ["phrase_boundary_cut"],
-                        "transition_bar_options": [],
-                        "transition_metrics_by_bars": {},
-                        "b_tempo_change_fraction": target_tempo_change,
-                        "best_strategy_for_two_bars": "clean_break",
-                        "heuristic_score": float(
-                            0.45 * float(exit_candidate["score"])
-                            + 0.45 * float(entry_candidate["score"])
-                            + 0.10 * float(entry_candidate.get("boundary_change", 0.0))
-                        ),
-                    }
-                )
                 continue
             try:
                 metrics_by_bars = {
@@ -268,7 +270,10 @@ def build_pairs(
             "b_tempo_change_fraction": target_tempo_change,
             "maximum_tempo_change_fraction": MAX_TEMPO_CHANGE_FRACTION,
             "compatible": tempo_compatible,
+            "source_led_compatible": abs(target_tempo_change) <= MAX_TEMPO_CHANGE_FRACTION,
+            "shared_tempo_bounds": shared_tempo,
         },
+        "target_beat_count": len(target.get("rhythm", {}).get("beats_seconds", [])) or None,
         "pairs": kept,
         "clean_break_pairs": clean_break_kept,
         "evaluated_pair_count": len(source["candidates"]["exit"])

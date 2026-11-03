@@ -572,8 +572,8 @@ class MetaPlannerTest(unittest.TestCase):
         self.assertEqual(arm_calls, [True])
 
         status, payload = store.request_auto_arm(False)
-        self.assertEqual(status, 200)
-        self.assertFalse(payload["auto_arm_enabled"])
+        self.assertEqual(status, 409)
+        self.assertTrue(store.auto_arm_enabled)
         self.assertEqual(arm_calls, [True])
 
     def test_auto_arm_retries_until_target_transport_is_observed(self) -> None:

@@ -102,7 +102,8 @@ class TransitionPipelineTest(unittest.TestCase):
         self.assertEqual(len(calls), 9)
         self.assertEqual(len(edges), 9)
         self.assertTrue(all(edge.status == "analyzed" for edge in edges))
-        self.assertTrue(all(edge.candidate_count == 1 for edge in edges))
+        # One beat-sync cue pair plus the same cues as a native-tempo cut.
+        self.assertTrue(all(edge.candidate_count == 2 for edge in edges))
 
         _, cached_edges = pipeline.set_queue(self.track_ids)
         self.assertEqual(len(calls), 9)
@@ -146,7 +147,7 @@ class TransitionPipelineTest(unittest.TestCase):
         target_id = self.track_ids[1]
         target_path = self.catalog.tracks[target_id].analysis_path
         target = json.loads(target_path.read_text(encoding="utf-8"))
-        target["rhythm"]["bpm"] = 90.0
+        target["rhythm"]["bpm"] = 60.0
         target_path.write_text(json.dumps(target), encoding="utf-8")
         catalog = AnalysisCatalog.from_root(self.analysis_root)
         pipeline = TransitionPipeline(

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -25,7 +27,7 @@ class PreparedActivation:
             "queueRevision": int(self.queue["revision"]),
             "trackCount": len(self.queue["ordered_track_ids"]),
             "playlist": str(self.playlist_path),
-            "message": "Open the generated playlist in Mixxx and select its first row, then Start set.",
+            "message": "Open the generated playlist in Mixxx and select its first row, then Build performance plan.",
         }
 
 
@@ -61,8 +63,11 @@ def prepare_activation(
     }
     catalog = AnalysisCatalog.from_root(workspace / "artifacts/time-map")
     manifest = resolve_set_list(catalog, queue, [workspace / "local-assets/samples"])
-    playlist_path = runtime / "prepared-tonight-set.m3u8"
-    manifest_path = runtime / "prepared-tonight-set-v1.json"
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    short_hash = hashlib.sha256(json.dumps(queue, sort_keys=True).encode("utf-8")).hexdigest()[:5]
+    export_name = f"prepared-tonight-set-{timestamp}-{short_hash}"
+    playlist_path = runtime / f"{export_name}.m3u8"
+    manifest_path = runtime / f"{export_name}-v1.json"
     activation_path = runtime / "prepared-activation-v1.json"
     write_mixxx_playlist(manifest, playlist_path, manifest_path)
     activation = {

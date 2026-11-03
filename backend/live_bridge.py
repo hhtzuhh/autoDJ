@@ -41,6 +41,7 @@ from meta_planner import (  # noqa: E402
     build_rolling_candidates,
     build_three_transition_candidates,
     build_transition_window_candidates,
+    diverse_window_candidates,
     load_dotenv,
     select_future_fallback,
     select_with_meta,
@@ -49,6 +50,8 @@ from set_builder import SetBuilderService  # noqa: E402
 from crowd_adaptive import CrowdAdaptiveMixin  # noqa: E402
 from flow_telemetry import LiveFlowTelemetry  # noqa: E402
 from clean_break import compile_clean_break_plan, select_clean_break_with_meta  # noqa: E402
+from transition_techniques import apply_technique, selected_techniques  # noqa: E402
+from performance_actions import compile_routine, validate_window_actions  # noqa: E402
 from set_activation import (  # noqa: E402
     load_prepared_activation,
     prepare_activation,
@@ -119,10 +122,13 @@ class LiveStateStore(CrowdAdaptiveMixin):
         self.auto_chain_started_for: set[str] = set()
         self.sampler_slots: dict[str, int] = {}
         self.continuous_set_active = False
-        self.auto_arm_enabled = False
+        self.auto_arm_enabled = True
         self.continuity_guard_tracks: set[str] = set()
         self.continuity_guard_last: dict[str, float] = {}
         self.activation_in_progress = False
+        # A reviewed first window is valid only within this bridge session.
+        self.prepared_performance: dict[str, Any] | None = None
+        self.performance_plan_state: dict[str, Any] = {"status": "idle"}
         queue_path = self.data_root / "artifacts/live-performance/queue-state-v1.json"
         self.queue = load_json(queue_path) if queue_path.exists() else {
             "schema_version": 1, "revision": 0, "ordered_track_ids": [],
@@ -269,6 +275,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             state["plan"].update(self._planning_activity())
             state["setBuilder"] = self.set_builder.snapshot()
             state["setBuilder"]["activation"] = self._activation_snapshot()
+            state["setBuilder"]["performancePlan"] = self._performance_plan_snapshot()
             if hasattr(self, "flow_telemetry"):
                 state["flowTelemetry"] = self.flow_telemetry.snapshot(self.supervisor,
                     continuous=self.continuous_set_active, activating=self.activation_in_progress,
@@ -350,6 +357,38 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 return 200, self.set_builder.load_saved_set(str(payload.get("id", "")))
             except (ValueError, KeyError, OSError) as error:
                 return 409, {"error": str(error)}
+
+    def request_import_playlist(self, payload: dict[str, Any], *, preview: bool = False) -> tuple[int, dict[str, Any]]:
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            try:
+                return 200, self.set_builder.import_playlist(payload.get("filename"), payload.get("content"), preview=preview)
+            except ValueError as error:
+                return 400, {"error": str(error)}
+            except (OSError, KeyError, TypeError):
+                return 409, {"error": "Could not read the local library; refresh and preview the playlist again"}
+
+    def request_import_prepared_playlist(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Step 2 shortcut: restore candidate preparation and bind an export for Step 3."""
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            if self.raw_performance is None or any(deck.play is not False for deck in self.raw_performance.decks.values()):
+                return 409, {"error": "Both Decks must be stopped before importing a prepared playlist"}
+            try:
+                state = self.set_builder.import_playlist(payload.get("filename"), payload.get("content"), prepared=True)
+                prepared = prepare_activation(self.data_root, state, active_queue_revision=int(self.queue["revision"]))
+            except (ValueError, KeyError, TypeError) as error:
+                return 409, {"error": str(error)}
+            except OSError:
+                return 409, {"error": "Could not restore prepared files; verify the local library and retry"}
+            self.prepared_performance = None
+            self.performance_plan_state = {"status": "idle"}
+            count = len(state["transitions"])
+            message = f"Playlist imported with {count} locally validated adjacent transitions. Continue to Step 3: Build performance plan. Open the playlist in Mixxx and select its first song."
+            self._append_system_event("Prepared playlist imported", message)
+            return 200, {**prepared.public(), "transitionCount": count, "message": message}
 
     def request_queue_reorder(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         if self._executor_running():
@@ -519,20 +558,33 @@ class LiveStateStore(CrowdAdaptiveMixin):
         self.auto_chain_started_for.clear()
         self.human_replan_started_for.clear()
 
-    def request_start_set(self) -> tuple[int, dict[str, Any]]:
-        """Stage the queue, require an initial Meta plan, then start Deck 1."""
+    def request_build_performance_plan(self) -> tuple[int, dict[str, Any]]:
+        """Stage stopped decks and build a reviewable first window, without play."""
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            self.prepared_performance = None
+            self.performance_plan_state = {"status": "building"}
+            status, payload = self._build_performance_plan()
+            if status >= 400:
+                self.prepared_performance = None
+                self.performance_plan_state = {"status": "failed", "error": payload.get("detail") or payload.get("message") or payload.get("error")}
+            return status, payload
+
+    def _build_performance_plan(self) -> tuple[int, dict[str, Any]]:
+        """Load/verify the exported set, then ask Meta for its first rolling window."""
         with self.action_lock:
             if self._executor_running():
-                return 409, {"error": "cannot start a set while a transition executes"}
+                return 409, {"error": "cannot build a performance plan while a transition executes"}
             if self.raw_performance is None:
                 return 503, {"error": "Mixxx performance snapshot is unavailable"}
-            if any(deck.play is True for deck in self.raw_performance.decks.values()):
-                return 409, {"error": "stop both Decks before starting a prepared set"}
+            if any(deck.play is not False for deck in self.raw_performance.decks.values()):
+                return 409, {"error": "confirm both Decks are stopped before building the performance plan"}
             activation_path = (
                 self.data_root / "artifacts/live-performance/prepared-activation-v1.json"
             )
             if not activation_path.exists():
-                return 409, {"error": "prepare the Mixxx set before starting it"}
+                return 409, {"error": "export the Mixxx playlist before building the performance plan"}
             try:
                 activation = load_prepared_activation(activation_path)
                 builder = self.set_builder.snapshot()
@@ -569,8 +621,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     send_library_value,
                     send_load_sampler_value,
                     send_stage_sampler_value,
-                    send_sync_value,
-                    send_value,
                 )
 
                 with mido.open_output(port_name()) as output:
@@ -581,16 +631,31 @@ class LiveStateStore(CrowdAdaptiveMixin):
                         with self.lock:
                             previous_revision = int(self.raw_performance.revision)
                         send_load_sampler_value(output, 1, slot)
+                        # Stopped-set preparation can wait for a cold Mixxx load;
+                        # keep the shorter default for live handoff/recovery.
                         if not self._wait_for_loaded_track_after_revision(
-                            1, track_id, previous_revision
+                            1, track_id, previous_revision, timeout=12.0
                         ):
+                            with self.lock:
+                                observed_id = self.raw_performance.decks[1].track_id
+                            titles = {row["id"]: row["title"] for row in builder.get("queue", [])}
+                            expected_title = titles.get(track_id, track_id[:8])
+                            # The selected set need not contain the incorrectly loaded song.
+                            observed_title = next(
+                                (row["title"] for row in builder.get("library", []) if row["id"] == observed_id),
+                                titles.get(observed_id, observed_id[:8] if observed_id else "unidentified track"),
+                            )
                             return 409, {
                                 "error": "mixxx_sampler_staging_identity_mismatch",
                                 "track_id": track_id,
+                                "observed_track_id": observed_id,
                                 "sampler_slot": slot,
                                 "message": (
-                                    "Open the generated playlist and select its first row; "
-                                    "the exact queue registry was not activated."
+                                    f'Mixxx loaded "{observed_title}" instead of song {index + 1}, "{expected_title}". '
+                                    "Import/open the exported M3U8 in Mixxx, keep its original playlist order, "
+                                    "select the first song in the track table, then retry Build performance plan. "
+                                    "Importing into this web app does not select the playlist in Mixxx. "
+                                    "No Meta planning or playback was started."
                                 ),
                             }
                         if index + 1 < len(ordered_ids):
@@ -604,7 +669,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                             output, deck_number, sampler_slots[track_id]
                         )
                         if not self._wait_for_loaded_track_after_revision(
-                            deck_number, track_id, previous_revision
+                            deck_number, track_id, previous_revision, timeout=12.0
                         ):
                             return 409, {
                                 "error": "mixxx_sampler_registry_final_load_failed",
@@ -626,7 +691,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     self._install_active_queue(activation["queue"])
                     self.sampler_slots = sampler_slots
                     self.current_track_id = first_id
-                    self.continuous_set_active = True
+                    self.continuous_set_active = False
                     planning_deadline = time.monotonic() + 3.0
                     while True:
                         plan_status, plan_payload = self.request_meta_plan()
@@ -651,13 +716,14 @@ class LiveStateStore(CrowdAdaptiveMixin):
                         self._write_dashboard_selection(previous_selection)
                         return 409, {
                             "error": "initial_meta_plan_required",
-                            "detail": plan_payload.get("error"),
+                            "detail": plan_payload.get("detail") or plan_payload.get("error"),
                             "message": (
-                                "Meta did not produce the initial three-track buffer; "
-                                "both Decks remain stopped."
+                                "Meta did not produce the initial rolling window: "
+                                f"{plan_payload.get('detail') or plan_payload.get('error')}. "
+                                "Both Decks remain stopped."
                             ),
                         }
-                    queue = promote_prepared_activation(self.data_root, activation)
+                    promote_prepared_activation(self.data_root, activation)
                 except Exception:
                     self._install_active_queue(previous_queue)
                     self.current_track_id = previous_current_id
@@ -670,41 +736,135 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     self.continuous_set_active = previous_continuous_set_active
                     self._write_dashboard_selection(previous_selection)
                     raise
-                with mido.open_output(port_name()) as output:
-                    for deck_number in (1, 2):
-                        send_sync_value(output, deck_number, "enabled", False)
-                        send_value(output, str(deck_number), "rate", 0.0)
-                        send_value(output, str(deck_number), "volume", 0.75)
-                    send_value(output, "master", "crossfader", 0.0)
-                    send_value(output, "1", "play", 1.0)
-                if self.auto_arm_enabled:
-                    self.auto_chain_cancel.clear()
-                    threading.Thread(
-                        target=self._arm_ready_plan_with_retry,
-                        name="idj-initial-auto-arm",
-                        daemon=True,
-                    ).start()
+                self.prepared_performance = {
+                    "activation": deepcopy(activation), "selection": deepcopy(self.selection),
+                    "decks": self._performance_deck_binding(),
+                }
+                error = self._prepared_performance_error()
+                if error:
+                    raise ValueError(error)
+                self.performance_plan_state = {"status": "ready"}
             except Exception as error:
                 return 502, {
-                    "error": "mixxx_set_start_failed",
+                    "error": "performance_plan_build_failed",
                     "detail": f"{type(error).__name__}: {error}",
                 }
             finally:
                 self.activation_in_progress = False
             self._append_system_event(
-                "Prepared set started",
-                "The initial Meta A→B→C plan was ready before Deck 1 started.",
+                "Performance plan ready for review",
+                "Meta planned the first rolling window. Both Decks remain stopped; Start playback is a separate action.",
             )
             return 202, {
                 "accepted": True,
-                "queueRevision": int(queue["revision"]),
+                "queueRevision": int(self.queue["revision"]),
                 "planning": False,
                 "plan_id": plan_payload["plan_id"],
-                "message": "Initial three-track Meta buffer is ready; Deck 1 started.",
+                "message": "First rolling window is ready to review. No playback started.",
             }
+
+    def _performance_deck_binding(self) -> list[dict[str, Any]]:
+        if self.raw_performance is None:
+            return []
+        return [{"deck": number, "track": getattr(deck, "track_id", None),
+                 "analysis": getattr(deck, "analysis_cache_key", None),
+                 "beat": getattr(deck, "beat_index", None)}
+                for number, deck in sorted(self.raw_performance.decks.items())]
+
+    def _prepared_performance_error(self) -> str | None:
+        prepared = getattr(self, "prepared_performance", None)
+        if not prepared:
+            return "Build performance plan before starting playback."
+        activation = self._activation_snapshot()
+        if activation is None:
+            return "Playlist preparation changed. Export and build the plan again."
+        path = self.data_root / "artifacts/live-performance/prepared-activation-v1.json"
+        try:
+            if load_prepared_activation(path) != prepared["activation"]:
+                return "Playlist export changed. Build the plan again."
+        except (OSError, ValueError, KeyError):
+            return "Playlist export is unavailable. Export and build the plan again."
+        if self.queue != prepared["activation"]["queue"] or self.selection != prepared["selection"]:
+            return "Queue or performance plan changed. Build the plan again."
+        if self._performance_deck_binding() != prepared["decks"]:
+            return "Loaded songs or cue positions changed. Build the plan again."
+        plan = self.selection.get("next_executable_plan", {})
+        for key in ("deck_a", "deck_b"):
+            track = plan.get(key, {})
+            deck = self.raw_performance.decks.get(track.get("deck")) if self.raw_performance else None
+            if (deck is None or getattr(deck, "track_id", None) != track.get("audio_sha256")
+                    or getattr(deck, "analysis_cache_key", None) != track.get("analysis_cache_key")):
+                return "Loaded song identity is not verified. Build the plan again."
+        source = self.raw_performance.decks[plan["deck_a"]["deck"]]
+        if source.beat_index is None or source.beat_index >= plan["deck_a"]["play_start_beat_index"]:
+            return "The initial action no longer has enough runway. Build the plan again."
+        if (self.envelope or {}).get("status") in {"invalidated", "cancelled"}:
+            return "The plan was cancelled or taken over. Build the plan again."
+        if any(deck.play is not False for deck in self.raw_performance.decks.values()):
+            return "Stop both Decks before starting the reviewed plan."
+        return None
+
+    def _performance_plan_snapshot(self) -> dict[str, Any]:
+        state = dict(getattr(self, "performance_plan_state", {"status": "idle"}))
+        prepared = getattr(self, "prepared_performance", None)
+        if not prepared:
+            return state if state.get("status") != "ready" else {"status": "idle"}
+        error = self._prepared_performance_error()
+        selection = prepared["selection"]
+        return {"status": "stale" if error else "ready", "error": error,
+                "planId": selection.get("next_executable_plan", {}).get("plan_id"),
+                "model": selection.get("model"), "reason": selection.get("model_decision", {}).get("reason"),
+                "trackIds": selection.get("planning_window_track_ids", []),
+                "transitions": deepcopy(selection.get("transition_buffer", []))}
+
+    def request_start_set(self) -> tuple[int, dict[str, Any]]:
+        """Play the reviewed first window; never stage songs or call Meta here."""
+        with self.action_lock:
+            if self._executor_running() or self.activation_in_progress:
+                return 409, {"error": "Wait for the current transition or activation to finish"}
+            error = self._prepared_performance_error()
+            if error:
+                return 409, {"error": "performance_plan_not_ready", "message": error}
+            plan_id = self.selection["next_executable_plan"]["plan_id"]
+            self.activation_in_progress = True
+            try:
+                import mido
+                from probe import port_name, send_sync_value, send_value
+                with mido.open_output(port_name()) as output:
+                    for deck_number in (1, 2):
+                        send_sync_value(output, deck_number, "enabled", False)
+                        send_value(output, str(deck_number), "rate", 0.0)
+                        send_value(output, str(deck_number), "volume", 0.75)
+                    # Recheck after opening MIDI: observer updates continue during activation.
+                    error = self._prepared_performance_error()
+                    if error:
+                        return 409, {"error": "performance_plan_not_ready", "message": error}
+                    send_value(output, "master", "crossfader", 0.0)
+                    send_value(output, "1", "play", 1.0)
+                self.continuous_set_active = True
+                self.current_track_id = self.selection["next_executable_plan"]["deck_a"]["audio_sha256"]
+                self.prepared_performance = None
+                self.performance_plan_state = {"status": "started", "planId": plan_id}
+                # Starting a newly reviewed set explicitly resumes automatic handoffs.
+                # Cancel/takeover can still suspend automation afterwards.
+                self.auto_arm_enabled = True
+                self.auto_chain_cancel.clear()
+                threading.Thread(target=self._arm_ready_plan_with_retry,
+                                 name="idj-initial-auto-arm", daemon=True).start()
+            except Exception as error:
+                self.prepared_performance = None
+                self.performance_plan_state = {"status": "failed", "error": "Playback start failed; rebuild before retrying."}
+                return 502, {"error": "mixxx_set_start_failed", "detail": f"{type(error).__name__}: {error}"}
+            finally:
+                self.activation_in_progress = False
+            self._append_system_event("Reviewed set started", "Deck 1 started with the reviewed plan; no new initial Meta request.")
+            return 202, {"accepted": True, "plan_id": plan_id, "planning": False,
+                         "message": "Deck 1 started with the reviewed performance plan."}
 
     def request_arm(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
+            if getattr(self, "prepared_performance", None):
+                return 409, {"error": "Start playback before arming the reviewed plan."}
             if (self.envelope or {}).get("invalidation_reason") == "bridge_restart_needs_human":
                 return 409, {
                     "error": "bridge_restart_needs_human",
@@ -769,25 +929,20 @@ class LiveStateStore(CrowdAdaptiveMixin):
     def request_auto_arm(self, enabled: Any) -> tuple[int, dict[str, Any]]:
         if not isinstance(enabled, bool):
             return 400, {"error": "enabled_must_be_boolean"}
+        if not enabled:
+            return 409, {"error": "Auto arm is fixed on for this demo. Use Take over to suspend automation."}
         with self.action_lock:
-            if enabled and self._recovery_reason():
+            if self._recovery_reason():
                 return 409, {"error": "recover_from_live_position_required",
                              "message": "Recover from the current deck first, then enable Auto arm."}
-            self.auto_arm_enabled = enabled
-            if not enabled:
-                self._crowd_stop("Auto arm disabled by operator.")
+            self.auto_arm_enabled = True
             self._append_system_event(
-                "Auto arm enabled" if enabled else "Auto arm disabled",
-                (
-                    "Ready transitions will arm automatically after deck rotation."
-                    if enabled
-                    else "Meta keeps the ready buffer full; every transition now requires human approval."
-                ),
+                "Auto arm enabled",
+                "Ready transitions will arm automatically after deck rotation.",
             )
             arm_payload: dict[str, Any] | None = None
             if (
-                enabled
-                and isinstance(self.selection.get("next_executable_plan"), dict)
+                isinstance(self.selection.get("next_executable_plan"), dict)
                 and not self._executor_running()
                 and self.supervisor is None
             ):
@@ -802,8 +957,6 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     "Auto arm is on. The current ready plan was armed."
                     if arm_payload is not None
                     else "Auto arm is on; the next ready plan will arm automatically."
-                    if enabled
-                    else "Auto arm is off. Planning continues, but execution requires Approve & arm."
                 ),
             }
 
@@ -946,7 +1099,8 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     if call["id"] == request_id:
                         call.update(event)
                         break
-        return OpenAICompatibleTransport(config, on_event=record)
+        artifact_dir = self.data_root / "artifacts/live-performance/meta-calls" / request_id
+        return OpenAICompatibleTransport(config, on_event=record, artifact_dir=artifact_dir)
 
     def _stamp_meta_origin(self, compiled: dict[str, Any], request_id: str | None) -> None:
         """Persist decision provenance so promotion never invents a new API call."""
@@ -1008,6 +1162,8 @@ class LiveStateStore(CrowdAdaptiveMixin):
     def _schedule_future_transition_plan(self) -> bool:
         """Replenish after the current edge; serialize requests and rate-limit failures."""
         with self.action_lock:
+            if getattr(self, "prepared_performance", None):
+                return False
             context = self._future_context()
             if context is None or self.future_plan_in_progress:
                 return False
@@ -1059,6 +1215,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 minimum_first_exit = (
                     int(active["deck_b"]["cue_beat_index"])
                     + int(active.get("mix", {}).get("bars", 0)) * 4
+                    + int(active.get("tempo_routine", {}).get("post_beats", 0))
                     + MINIMUM_DWELL_BEATS
                 )
                 candidates = self._constrained_window_candidates(
@@ -1088,6 +1245,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 track_ids=track_ids,
                 model=config.model,
                 transport=self._meta_transport(config, meta_call),
+                track_context=self._planning_track_context(track_ids),
             )
             with self.action_lock:
                 if self._future_context() != context:
@@ -1172,7 +1330,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             or first.get("target_track_id") != target_id
         ):
             return None
-        if int(first["source_exit_beat_index"]) <= live_beat + 16:
+        if int(first["source_exit_beat_index"]) - int(first.get("routine", {}).get("pre_beats", 0)) <= live_beat + 16:
             self.future_transition_plan = None
             return None
         plan = future["next_executable_plan"]
@@ -1354,6 +1512,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     track_ids=track_ids,  # type: ignore[arg-type]
                     model=config.model,
                     transport=self._meta_transport(config, meta_call),
+                    track_context=self._planning_track_context(track_ids),
                 )
                 compiled = self._compile_meta_selection(
                     track_ids,
@@ -1474,16 +1633,21 @@ class LiveStateStore(CrowdAdaptiveMixin):
             if shifted_feasibility[key]:
                 feasible.append(candidate)
         for candidate in feasible:
+            # New live windows use parameterized actions only when measured
+            # bounds exist. Old synthetic / persisted candidates stay readable.
+            if all(edge["mode"] == "clean_break" or edge.get("tempo_bounds") for edge in candidate["transitions"]):
+                candidate["action_planning"] = True
+                candidate["transitions"][0]["earliest_source_action_beat"] = minimum_exit
             candidate["refill_timing"] = self._window_refill_timing(
                 candidate["transitions"], queue_ids[source_index:source_index + len(pairings) + 1],
             )
         sufficient = [row for row in feasible if row["refill_timing"]["status"] == "sufficient"]
         if sufficient:
-            return sufficient[:10]
+            return diverse_window_candidates(sufficient)
         # Still return executable plans if none can reserve a full retry budget,
         # but prefer more runway and expose the shortfall rather than invent ready.
         feasible.sort(key=lambda row: row["refill_timing"]["minimumRunwaySeconds"] or 0, reverse=True)
-        return feasible[:10]
+        return diverse_window_candidates(feasible)
 
     def _window_refill_timing(self, edges: list[dict[str, Any]], track_ids: list[str]) -> dict[str, Any]:
         try:
@@ -1495,11 +1659,11 @@ class LiveStateStore(CrowdAdaptiveMixin):
         for index, (left, right) in enumerate(zip(edges, edges[1:])):
             analysis = getattr(self, "catalog", {}).get(track_ids[index + 1], {})
             beats = analysis.get("rhythm", {}).get("beats_seconds", [])
-            # Include executor cleanup and conservative +6% playback speed.
-            ready_beat = int(left["target_entry_beat_index"]) + int(left["transition_bars"]) * 4 + 8
-            exit_beat = int(right["source_exit_beat_index"])
+            # Include tempo recovery, next pre-ramp, and deck recycle margin.
+            ready_beat = int(left["target_entry_beat_index"]) + int(left["transition_bars"]) * 4 + int(left.get("routine", {}).get("post_beats", 0)) + 8
+            exit_beat = int(right["source_exit_beat_index"]) - int(right.get("routine", {}).get("pre_beats", 0))
             if 0 <= ready_beat < len(beats) and 0 <= exit_beat < len(beats):
-                runway.append(max(0.0, (float(beats[exit_beat]) - float(beats[ready_beat])) / 1.06))
+                runway.append(max(0.0, (float(beats[exit_beat]) - float(beats[ready_beat])) / 1.2))
         minimum = min(runway) if runway else None
         return {
             "budgetSeconds": round(budget, 1),
@@ -1554,6 +1718,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
         minimum_exit = (
             int(edge["target_entry_beat_index"])
             + int(edge.get("transition_bars", 0)) * 4
+            + int(edge.get("routine", {}).get("post_beats", 0))
             + MINIMUM_DWELL_BEATS
         )
         return any(
@@ -1591,8 +1756,10 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 model=model,
             )
             plan["plan_id"] = f"{plan['plan_id']}-{suffix}"
-            return plan
-        return self._build_executable_plan(
+            if edge.get("routine"):
+                return compile_routine(plan, edge, edge["routine"])
+            return apply_technique(plan, edge.get("technique", "clean_cut"))
+        plan = self._build_executable_plan(
             source_id=source_id,
             target_id=target_id,
             source_exit_beat=int(edge["source_exit_beat_index"]),
@@ -1604,6 +1771,9 @@ class LiveStateStore(CrowdAdaptiveMixin):
             plan_suffix=suffix,
             use_bass_swap=bool(edge.get("use_bass_swap", False)),
         )
+        if edge.get("routine"):
+            return compile_routine(plan, edge, edge["routine"])
+        return apply_technique(plan, edge.get("technique", "bass_swap" if edge.get("use_bass_swap") else "crossfade"))
 
     @staticmethod
     def _draft_from_buffer_edge(edge: dict[str, Any]) -> dict[str, Any]:
@@ -1615,6 +1785,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             "target_entry_beat_index": int(edge["target_entry_beat_index"]),
             "transition_bars": int(edge["transition_bars"]),
             "transition_mode": str(edge["mode"]),
+            "technique": edge.get("technique"),
         }
 
     def _restore_transition_buffer_overrides(self) -> None:
@@ -1632,6 +1803,23 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "targetEntryBeat": int(edge["target_entry_beat_index"]),
                 "bars": int(edge["transition_bars"]),
             }
+
+    def _planning_track_context(self, track_ids: tuple[str, ...]) -> dict[str, Any]:
+        builder = getattr(self, "set_builder", None)
+        if builder is None:
+            return {}
+        result = {}
+        with builder.lock:
+            for track_id in track_ids:
+                track = builder.catalog.get(track_id)
+                music = builder.music_results.get(track_id, {})
+                row = {"title": track.title, "measured_bpm": track.bpm} if track else {}
+                if music.get("status") == "ready" and isinstance(music.get("content"), str):
+                    row["music_description"] = {"source": music.get("model"), "verified": False,
+                        "scope": "whole_song_not_cue_specific", "text": music["content"][:3000]}
+                if row:
+                    result[track_id] = row
+        return result
 
     def _plan_three_transition_buffer(
         self,
@@ -1656,6 +1844,15 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "Meta API request started",
                 f"Calling {config.model} once to select one plan containing {len(track_ids) - 1} transitions.",
             )
+            def correct_rejected_window(system: str, user: str) -> str:
+                nonlocal meta_call
+                reason = json.loads(user)["validation_error"]
+                self._finish_meta_call(meta_call, ValueError(reason))
+                meta_call = self._begin_meta_call(config, track_ids, "current_plan")
+                self._append_system_event("Meta plan correction requested",
+                    f"Initial window rejected: {reason}. Requesting one complete correction; decks remain stopped.")
+                return self._meta_transport(config, meta_call)(system, user)
+
             selection = select_with_meta(
                 candidates,
                 queue_revision=int(self.queue["revision"]),
@@ -1663,6 +1860,8 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 track_ids=track_ids,
                 model=config.model,
                 transport=self._meta_transport(config, meta_call),
+                track_context=self._planning_track_context(track_ids),
+                repair_transport=correct_rejected_window if getattr(self, "activation_in_progress", False) else None,
             )
             self._finish_meta_call(meta_call)
         except Exception as error:
@@ -1725,12 +1924,17 @@ class LiveStateStore(CrowdAdaptiveMixin):
         source_deck: int,
         target_deck: int,
     ) -> dict[str, Any]:
+        actions = getattr(selection.decision, "transition_actions", None)
+        routines = validate_window_actions(selection.candidate["transitions"], actions) if actions is not None else None
+        techniques = [r["technique"] for r in routines] if routines else selected_techniques(selection.decision, selection.candidate["transitions"])
         transition_buffer = [
             {
                 **edge,
                 "source_track_id": track_ids[index],
                 "target_track_id": track_ids[index + 1],
-                "use_bass_swap": bool(selection.decision.use_bass_swap) if index == 0 and edge["mode"] != "clean_break" else False,
+                "technique": techniques[index],
+                **({"routine": routines[index]} if routines else {}),
+                "use_bass_swap": techniques[index] == "bass_swap",
             }
             for index, edge in enumerate(selection.candidate["transitions"])
         ]
@@ -1755,7 +1959,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             "planning_window_track_ids": list(track_ids),
             "planning_mode": "rolling_abcd" if len(track_ids) == 4 else "rolling_tail",
             "model_decision": selection.decision.to_dict(),
-            "selected_candidate": selection.candidate,
+            "selected_candidate": {**selection.candidate, "refill_timing": self._window_refill_timing(transition_buffer, list(track_ids))},
             "transition_buffer": transition_buffer,
             "next_executable_plan": plan,
             "following_feasible_draft": self._draft_from_buffer_edge(
@@ -2048,7 +2252,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             return 409, {"error": "following_target_is_not_loaded"}
         source_deck, source = source_match
         target_deck, _ = target_match
-        if int(edge["source_exit_beat_index"]) <= int(source.beat_index) + 16:
+        if int(edge["source_exit_beat_index"]) - int(edge.get("routine", {}).get("pre_beats", 0)) <= int(source.beat_index) + 16:
             return self._recover_expired_following(source_id, target_id)
         model = str(self.selection.get("model") or MetaConfig.from_environment().model)
         plan = self._plan_from_buffer_edge(
@@ -2443,6 +2647,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
     def _maybe_start_continuity_guard(self, performance: Any) -> None:
         if (
             not self.continuous_set_active
+            or getattr(self, "prepared_performance", None)
             or not self.auto_arm_enabled
             or self.activation_in_progress
         ):
@@ -2590,6 +2795,12 @@ class LiveStateStore(CrowdAdaptiveMixin):
 
     def request_takeover(self) -> tuple[int, dict[str, Any]]:
         with self.action_lock:
+            if getattr(self, "prepared_performance", None):
+                self.prepared_performance = None
+                self.performance_plan_state = {"status": "stale", "error": "Plan cancelled. Build again before playback."}
+                self.continuous_set_active = False
+                self.auto_arm_enabled = False
+                return 202, {"accepted": True, "message": "Reviewed plan cancelled; no playback started."}
             self.auto_arm_enabled = False
             self._crowd_stop("Human takeover.")
             self.auto_chain_cancel.set()
@@ -2756,6 +2967,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
         if (
             not self.continuous_set_active
             and self.sampler_slots
+            and not getattr(self, "prepared_performance", None)
             and current_id in self.sampler_slots
             and current_id in playing_ids
         ):
@@ -2817,7 +3029,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             with self.lock:
                 self.raw_performance = performance
                 self.state = {"dataSource": "live", "connected": True,
-                              "autoArmEnabled": False, "queueRevision": int(self.queue["revision"]),
+                              "autoArmEnabled": self.auto_arm_enabled, "queueRevision": int(self.queue["revision"]),
                               "performanceRevision": int(performance.revision),
                               "crossfader": float(performance.crossfader or 0), "decks": decks,
                               "queue": [], "transitions": [], "plan": plan, "events": list(self.events)}
@@ -2944,6 +3156,9 @@ class LiveStateStore(CrowdAdaptiveMixin):
             ),
             "bars": int(plan_payload["mix"].get("bars", 0)),
             "transitionMode": transition_mode,
+            "technique": plan_payload["mix"].get("technique", "clean_cut" if transition_mode == "clean_break" else "bass_swap" if plan_payload["mix"].get("bass_swap") else "crossfade"),
+            "performanceActions": plan_payload.get("performance_actions", []),
+            "tempoRoutine": plan_payload.get("tempo_routine"),
             "intent": str(self.selection.get("intent", "maintain_energy")).replace("_", " ").title(),
             "confidence": min(1.0, max(0.0, confidence)),
             "reason": str(
@@ -2987,6 +3202,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     "sourceTrackId": str(following_draft["source_track_id"]),
                     "targetTrackId": str(following_draft["target_track_id"]),
                     "sourceExitBeat": int(following_draft["source_exit_beat_index"]),
+                    "technique": following_draft.get("technique"),
                     "targetEntryBeat": int(following_draft["target_entry_beat_index"]),
                     "bars": int(following_draft["transition_bars"]),
                     "status": str(following_draft["status"]),
@@ -3184,6 +3400,14 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 status, response = store.request_set_build(payload)
                 self._json(status, response)
                 return
+            if self.path in {"/api/set-builder/preview-playlist", "/api/set-builder/import-playlist"}:
+                status, response = store.request_import_playlist(payload, preview=self.path.endswith("preview-playlist"))
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/import-prepared-playlist":
+                status, response = store.request_import_prepared_playlist(payload)
+                self._json(status, response)
+                return
             if self.path == "/api/set-builder/analyze":
                 status, response = store.request_library_analysis(payload)
                 self._json(status, response)
@@ -3210,6 +3434,10 @@ def make_handler(store: LiveStateStore) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/api/set-builder/start":
                 status, response = store.request_start_set()
+                self._json(status, response)
+                return
+            if self.path == "/api/set-builder/build-performance":
+                status, response = store.request_build_performance_plan()
                 self._json(status, response)
                 return
             if self.path == "/api/queue/reorder":

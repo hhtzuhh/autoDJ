@@ -20,7 +20,7 @@ test('library analysis precedes selection with explicit preparation and start no
   s.setBuilder.library=s.setBuilder.queue;s.setBuilder.queue=[];
   s.setBuilder.library[1].analysisStatus='analyzing';
   const flow=deriveAgentFlow(s,null,false,now);
-  assert.deepEqual(flow.preparation.map(n=>n.id),['library','analysis','music','curation','pairs','export','start']);
+  assert.deepEqual(flow.preparation.map(n=>n.id),['library','analysis','music','curation','pairs','export','performance','start']);
   assert.equal(find(flow,'preparation','analysis').status,'running');
   assert.equal(find(flow,'preparation','curation').status,'waiting');
   assert.match(find(flow,'preparation','analysis').label,/1\/2 ready/);
@@ -136,11 +136,39 @@ test('selection waits during automatic Muse description stage', () => {
 test('prepared candidates and export do not imply the selected set is playing', () => {
   const s=fixture();s.setBuilder.preserveSelectedOrder=true;s.setBuilder.activation={status:'playlist_ready'};
   let flow=deriveAgentFlow(s,null,false,now);
-  assert.equal(find(flow,'preparation','start').status,'waiting');
+  assert.equal(find(flow,'preparation','start').status,'idle');
+  assert.equal(find(flow,'preparation','performance').status,'waiting');
   assert.equal(flow.preparation.some(n=>n.id==='refine'),false);
   s.flowTelemetry.continuousSetActive=true;s.queue=[{id:'a'},{id:'b'}];
   flow=deriveAgentFlow(s,null,false,now);
   assert.equal(find(flow,'preparation','start').status,'done');
   s.queue=[{id:'other'}];
-  assert.equal(find(deriveAgentFlow(s,null,false,now),'preparation','start').status,'waiting');
+  assert.equal(find(deriveAgentFlow(s,null,false,now),'preparation','start').status,'idle');
+});
+
+
+test('reviewable performance window is distinct from playback and exposes failures', () => {
+  const s=fixture();s.decks.forEach(d=>d.playing=false);
+  s.setBuilder.activation={status:'playlist_ready'};
+  for (const [status,expected] of [['building','running'],['ready','done'],['stale','error'],['failed','error']]) {
+    s.setBuilder.performancePlan={status};
+    s.flowTelemetry.activationInProgress=status==='building';
+    const flow=deriveAgentFlow(s,null,false,now);
+    assert.equal(find(flow,'preparation','performance').status,expected);
+    assert.equal(find(flow,'preparation','start').status,status==='ready'?'waiting':'idle');
+    assert.equal(find(flow,'preparation','export').status,'done');
+    assert.equal(find(flow,'liveNodes','execute').status,'idle');
+  }
+  assert.equal(find(deriveAgentFlow(s,null,true,now),'preparation','performance').status,'stale');
+});
+
+test('manual playlist import is not attributed to Meta selection', () => {
+  const s=fixture();s.setBuilder.selectionSource={kind:'mixxx_playlist',filename:'manual.m3u8'};
+  s.setBuilder.selectionOnly=true;
+  const flow=deriveAgentFlow(s,null,false,now);
+  const selection=find(flow,'preparation','curation');
+  assert.equal(selection.owner,'MANUAL · MIXXX PLAYLIST');
+  assert.match(selection.label,/imported · order preserved/);
+  assert.match(selection.detail,/No Meta selection call/);
+  assert.equal(flow.records.length,0);
 });

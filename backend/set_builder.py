@@ -22,8 +22,11 @@ from typing import Any, Callable, Iterable
 
 from meta_planner import MetaConfig, MetaOutputLimitError, OpenAICompatibleTransport
 from pair_analyzer import PAIR_VERSION
+from transition_techniques import TECHNIQUES
+from performance_actions import ACTION_CATALOG, tempo_bounds
 from transition_pipeline import AnalysisCatalog, PairAnalysisCache, adjacent_pairs, utc_now
 from music_features import MusicFeatures
+from playlist_import import preview_playlist
 
 
 AUDIO_SUFFIXES = {".aif", ".aiff", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
@@ -391,7 +394,7 @@ class SetBuilderService:
     def _tempo_compatible(source: CatalogTrack, target: CatalogTrack) -> bool:
         if source.bpm <= 0 or target.bpm <= 0:
             return False
-        return abs(source.bpm / target.bpm - 1.0) <= 0.06
+        return tempo_bounds(source.bpm, target.bpm) is not None
 
     def _blocked_count(self, ordered: Iterable[str]) -> int:
         return sum(
@@ -439,7 +442,9 @@ class SetBuilderService:
         temporary.replace(self.state_path)
         if (self.state.get("status") == "selected" or self.state.get("status") == "ready" and self.state.get("activationReady")) and not self.state.get("loadedFromSavedSet"):
             build_id = self.state.get("buildId")
-            if build_id and re.fullmatch(r"build-\d+", build_id):
+            if (build_id and re.fullmatch(r"build-\d+", build_id)
+                    and all((self.analysis_root / t / "track-analysis-v1.json").is_file()
+                            and self.catalog[t].analysis_status == "ready" for t in self.state["orderedTrackIds"])):
                 self.saved_root.mkdir(parents=True, exist_ok=True)
                 saved = self.saved_root / f"{build_id}-q{int(self.state['queueRevision'])}.json"
                 if not saved.exists():
@@ -480,13 +485,12 @@ class SetBuilderService:
             ids = saved["orderedTrackIds"]
             if len(ids) < 2 or len(set(ids)) != len(ids) or any(t not in catalog or catalog[t].analysis_status != "ready" for t in ids):
                 raise ValueError("Saved playlist requires songs and analyses that are no longer available")
-            if saved.get("pairAnalysisVersion") != PAIR_VERSION:
-                raise ValueError("Saved playlist uses an older analysis version; build a new playlist")
             keys = {t: json.loads((self.analysis_root / t / "track-analysis-v1.json").read_text())["analysis_cache_key"] for t in ids}
             if record.get("analysisKeys") != keys:
                 raise ValueError("Analysis changed since this playlist was saved; build a new playlist")
             self.catalog = catalog
             self.state = {**saved, "queueRevision": int(self.state["queueRevision"]) + 1,
+                          "pairAnalysisVersion": PAIR_VERSION,
                           "selectionOnly": not self.prepare_transitions,
                           "transitionsRequested": False, "preserveSelectedOrder": False,
                           "buildPhase": "transitions" if self.prepare_transitions else "selection_complete",
@@ -496,6 +500,51 @@ class SetBuilderService:
             if self.prepare_transitions:
                 self._refresh_edges()
             self._schedule_current()
+            self._recompute_status()
+            self._persist()
+            return self.snapshot()
+
+    def import_playlist(self, filename: str, content: str, *, preview: bool = False, prepared: bool = False) -> dict[str, Any]:
+        """Import selection, optionally restoring locally validated pair preparation."""
+        with self.lock:
+            if self.queued_jobs or self.state.get("status") in {"curating", "analyzing", "planning"}:
+                raise ValueError("Wait for current preparation to finish before importing a playlist")
+            catalog = scan_catalog(self.library_root, self.analysis_root, metadata_reader=self.metadata_reader)
+            report = preview_playlist(filename, content, catalog, self.library_root)
+            if preview:
+                return report
+            if not report["canImport"]:
+                raise ValueError("Resolve every missing, remote, or repeated song before importing; no partial playlist was selected")
+            ids = [track["id"] for track in report["tracks"]]
+            edges = []
+            revision = int(self.state["queueRevision"]) + 1
+            if prepared:
+                if report["missingAnalysis"]:
+                    raise ValueError("This playlist needs local song analysis before it can be restored as a prepared set")
+                # Compute before replacing selection. ensure() reuses only caches
+                # bound to both current analysis keys and the pair algorithm version.
+                for source_id, target_id in adjacent_pairs(ids):
+                    result = self.pair_builder(source_id, target_id)
+                    count, reason = result if isinstance(result, tuple) else (result, None)
+                    if count < 1:
+                        raise ValueError(f"No valid transition candidates for {catalog[source_id].title} → {catalog[target_id].title}; previous selection preserved")
+                    edges.append({**self._edge(source_id, target_id, "analyzed"),
+                                  "candidateCount": count, "standbyReady": True,
+                                  "reason": reason, "queueRevision": revision})
+            self.catalog = catalog
+            self.music_results = {t: self.music_extractor.load(t) for t in catalog}
+            self.state.pop("loadedFromSavedSet", None)
+            self.state.update(buildId=f"build-{time.time_ns()}", prompt=f"Imported: {report['filename']}",
+                              selectionSource={"kind": "mixxx_playlist", "filename": report["filename"]},
+                              model=None, reason="Manually imported playlist; original song order preserved. No Meta selection call.",
+                              error=None, orderedTrackIds=ids, requestedCount=len(ids),
+                              queueRevision=revision,
+                              buildPhase="transitions" if prepared else "selection_complete",
+                              selectionOnly=not prepared, transitionsRequested=prepared,
+                              preserveSelectedOrder=True, postAnalysisPlanning="idle", transitions=edges,
+                              analysisTrackIds=[], analysisRuns={}, pairAnalysisVersion=PAIR_VERSION,
+                              trackStatuses={t: row.analysis_status for t, row in catalog.items()},
+                              analysisOrigins={t: "available" if row.analysis_status == "ready" else "pending" for t, row in catalog.items()})
             self._recompute_status()
             self._persist()
             return self.snapshot()
@@ -755,6 +804,7 @@ class SetBuilderService:
                 raise ValueError("Build requires Muse descriptions for every song; use MP3/WAV files in the library")
             self.state["buildId"] = f"build-{time.time_ns()}"
             self.state.pop("loadedFromSavedSet", None)
+            self.state.pop("selectionSource", None)
             self.state.update(buildPhase="library_analysis", requestedCount=count,
                               selectionOnly=not self.prepare_transitions, transitionsRequested=False,
                               preserveSelectedOrder=False,
@@ -899,6 +949,8 @@ class SetBuilderService:
             return {
                 **json.loads(json.dumps(self.state)),
                 "catalogCount": len(self.catalog),
+                "techniques": [{"id": name, **spec} for name, spec in TECHNIQUES.items()],
+                "actionCatalog": ACTION_CATALOG,
                 "library": [{**row.public(), "musicFeatures": json.loads(json.dumps(self.music_results.get(t, {"status": "pending"}))), "analysisStatus": self.state["trackStatuses"].get(t, row.analysis_status),
                              "analysisOrigin": self.state.get("analysisOrigins", {}).get(t, "unknown"),
                              "analysisRun": json.loads(json.dumps(self.state.get("analysisRuns", {}).get(t)))} for t, row in self.catalog.items()],

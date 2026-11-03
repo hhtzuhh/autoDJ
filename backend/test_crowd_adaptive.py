@@ -55,7 +55,7 @@ class CrowdAdaptiveTest(unittest.TestCase):
         self.session = str(uuid4())
         self.assertEqual(s.request_crowd_config({'enabled': True, 'session': self.session})[0], 200)
 
-    def stage(self, callback=None):
+    def stage(self, callback=None, *, cache_type=FakeCache, techniques=None):
         s = self.store
         with patch('crowd_adaptive.threading.Thread'):
             s._crowd_ingest(observation(self.session, cue='build'))
@@ -64,9 +64,25 @@ class CrowdAdaptiveTest(unittest.TestCase):
         def choose(candidates, **kwargs):
             if callback: callback()
             chosen = next(r for r in candidates if r['ordered_track_ids'][2] == 'd')
-            return MetaSelection(MetaDecision(chosen['candidate_id'], kwargs['intent'], True, .8, 'Synthetic stronger handoff.'), chosen, 'synthetic', len(candidates))
-        with patch('crowd_adaptive.PairAnalysisCache', FakeCache), patch('crowd_adaptive.select_with_meta', side_effect=choose), patch('crowd_adaptive.MetaConfig.from_environment', return_value=MetaConfig('synthetic')):
+            return MetaSelection(MetaDecision(chosen['candidate_id'], kwargs['intent'], True, .8, 'Synthetic stronger handoff.', techniques), chosen, 'synthetic', len(candidates))
+        with patch('crowd_adaptive.PairAnalysisCache', cache_type), patch('crowd_adaptive.select_with_meta', side_effect=choose), patch('crowd_adaptive.MetaConfig.from_environment', return_value=MetaConfig('synthetic')):
             s._crowd_plan_worker(gen, context, evidence)
+
+    def test_native_tempo_future_techniques_stage_without_changing_active_plan(self):
+        class CleanCache(FakeCache):
+            def payload(self, *args):
+                return {'clean_break_pairs': [{'rank': 1, 'a_exit': {'beat_index': 220},
+                    'b_entry': {'beat_index': 24}, 'heuristic_score': .8, 'transition_mode': 'clean_break'}]}
+        s=self.store
+        s.selection['next_executable_plan']['mix']={}
+        s.transition_pipeline.cache=CleanCache()
+        active=deepcopy(s.selection['next_executable_plan'])
+        self.stage(cache_type=CleanCache, techniques=('fade_out_cut','clean_cut','fade_out_cut'))
+        self.assertEqual(s.crowd['status'],'staged',s.crowd['reason'])
+        self.assertEqual(s.crowd['decision']['technique'],'fade_out_cut')
+        self.assertEqual(s.crowd['decision']['bars'],0)
+        self.assertEqual(s.crowd_pending['compiled']['next_executable_plan']['mix']['fade_out_seconds'],.5)
+        self.assertEqual(s.selection['next_executable_plan'],active)
 
     def test_bounded_orders_keep_locked_prefix_and_every_track(self):
         ids = list('abcdefghij')

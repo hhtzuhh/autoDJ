@@ -285,7 +285,7 @@ function PlanPanel({ state }: { state: CopilotState }) {
         <TrackMini track={source} />
         <div className="plan-route__bridge">
           <span>
-            {state.plan.transitionMode === "clean_break"
+            {state.plan.technique ? state.plan.technique.replaceAll("_", " ") : state.plan.transitionMode === "clean_break"
               ? "Clean break"
               : `${state.plan.bars} bars`}
           </span>
@@ -339,7 +339,20 @@ function PlanPanel({ state }: { state: CopilotState }) {
 
       <MetaActivity state={state} />
 
+      {!!state.plan.performanceActions?.length && <div className="planning-scope">
+        <strong>Performance plan · one Meta decision</strong>
+        <p>Beat 0 is the handoff cue. Negative beats prepare the outgoing song; later actions shape the incoming song.</p>
+        {state.plan.performanceActions.map((action, index) => <p key={index}>
+          <b>{action.function.replaceAll("_", " ")}</b> · beat {action.start_beat}
+          {action.deck && ` · ${action.deck} deck`}
+          {action.target_bpm != null && ` → ${action.target_bpm} BPM`}
+          {action.duration_beats != null && ` · ${action.duration_beats / 4} bars`}
+          {action.curve && ` · ${action.curve.replaceAll("_", " ")}`}
+          {action.fade_out_seconds != null && ` · fade ${action.fade_out_seconds}s`}
+        </p>)}
+      </div>}
       <div className="cue-grid">
+        {state.plan.technique && <div><span>Technique</span><strong>{state.plan.technique.replaceAll("_", " ")}</strong></div>}
         <div>
           <span>Cue / prepare</span>
           <strong>Beat {state.plan.sourceCueBeat}</strong>
@@ -389,31 +402,14 @@ function PlanPanel({ state }: { state: CopilotState }) {
 function QueuePanel({
   state,
   disabled,
-  notice,
-  onBuild,
   onReorder,
-  onActivate,
-  onPrepare,
-  onRetry,
-  onStart,
 }: {
   state: CopilotState;
   disabled: boolean;
-  notice: string | null;
-  onBuild: (prompt: string, count: number) => Promise<BuildResult>;
   onReorder: (trackIds: string[]) => Promise<void>;
-  onActivate: () => Promise<BuildResult>;
-  onPrepare: () => Promise<BuildResult>;
-  onRetry: () => Promise<void>;
-  onStart: () => Promise<BuildResult>;
 }) {
-  const [prompt, setPrompt] = useState("今天幫我排 10 首 house，能量慢慢往上");
-  const [count, setCount] = useState(10);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const builder = state.dataSource === "live" ? state.setBuilder : undefined;
-  const builderNotice = builder?.error
-    || (["curating", "analyzing", "planning"].includes(builder?.status ?? "") ? notice : null)
-    || builder?.reason;
   const prepared = Boolean(builder?.queue.length);
   const queueDragLocked = true;
   const shownQueue = prepared ? builder!.queue : state.queue;
@@ -464,76 +460,6 @@ function QueuePanel({
             : `${shownQueue.length} tracks`}
         </span>
       </div>
-      {state.dataSource === "live" && (
-        <div className="set-builder">
-          <div className="set-builder__prompt">
-            <input
-              aria-label="Describe tonight's set"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="今天幫我排 10 首 house…"
-              disabled={disabled}
-            />
-            <input
-              className="set-builder__count"
-              aria-label="Track count"
-              type="number"
-              min={2}
-              max={Math.max(2, builder?.catalogCount ?? 50)}
-              value={count}
-              onChange={(event) => setCount(Number(event.target.value))}
-              disabled={disabled}
-            />
-          </div>
-          <div className="set-builder__actions">
-            <button
-              className="button button--secondary"
-              disabled={disabled || !prompt.trim()}
-              onClick={() => void onBuild(prompt, count)}
-            >
-              <Icon name="spark" /><span>Build {count} tracks with Meta</span>
-            </button>
-            <button className="button button--secondary" disabled={disabled || !builder || builder.queue.length < 2 || ["curating", "analyzing", "planning"].includes(builder.status)} onClick={() => void onPrepare()}>
-              Prepare transitions
-            </button>
-            <button
-              className="button button--secondary"
-              disabled={disabled || !builder?.activationReady}
-              onClick={() => void onActivate()}
-            >
-              <span>Export Mixxx playlist</span>
-            </button>
-            <button
-              className="button button--primary"
-              disabled={disabled || !builder?.activationReady || builder?.activation?.status !== "playlist_ready" || state.decks.some(d => d.playing)}
-              onClick={() => void onStart()}
-            >
-              <Icon name="play" /><span>Start set</span>
-            </button>
-          </div>
-          <div className="set-builder__status">
-            <span className={`builder-state builder-state--${builder?.status ?? "idle"}`}>
-              {builder?.status === "selected" ? "Playlist selected · prepare transitions next" : builder?.status === "ready" ? "Set prepared" : builder?.status ?? "idle"}
-            </span>
-            <span>{builder?.catalogCount ?? 0} local tracks</span>
-            {builder?.model && <span>{builder.model}</span>}
-            {builder?.activationReady && <strong>Ready to activate</strong>}
-            {builder?.preparationReady && !builder.activationReady && (
-              <strong>Analysis ready · executor pending</strong>
-            )}
-          </div>
-          {builder?.postAnalysisPlanning === "failed" && <div className="set-builder__retry">
-            <button className="button button--secondary" disabled={disabled} onClick={() => void onRetry()}>
-              Retry planning only
-            </button>
-          </div>}
-          {builderNotice && (
-            <p className={builder?.error ? "set-builder__message is-error" : "set-builder__message"}>
-              {builderNotice}
-            </p>
-          )}
-        </div>
-      )}
       <div className="queue-list" role="list" aria-label="Performance queue">
         {shownQueue.map((track, index) => {
           const transition = edgeAfter.get(track.id);
@@ -1020,20 +946,6 @@ function App() {
     } finally {setActionPending(false);}
   };
 
-  const retrySetPlanning = async () => {
-    setActionPending(true);
-    try {
-      const response = await fetch("http://127.0.0.1:8765/api/set-builder/retry", {
-        method: "POST", headers: {"Content-Type": "application/json"}, body: "{}",
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Could not retry planning");
-      setActionNotice("Retrying Meta planning using completed analyses…");
-    } catch (error) {
-      setActionNotice(`Rejected: ${error instanceof Error ? error.message : String(error)}`);
-    } finally { setActionPending(false); }
-  };
-
   const reorderSet = async (orderedTrackIds: string[]) => {
     setActionPending(true);
     setActionNotice("Updating only the changed adjacent transitions…");
@@ -1053,7 +965,7 @@ function App() {
     }
   };
 
-  const sendSetAction = async (action: "prepare-transitions" | "activate" | "start"): Promise<BuildResult> => {
+  const sendSetAction = async (action: "prepare-transitions" | "activate" | "build-performance" | "start"): Promise<BuildResult> => {
     setActionPending(true);
     setActionNotice(null);
     try {
@@ -1139,13 +1051,7 @@ function App() {
           <QueuePanel
             state={state}
             disabled={actionPending || state.plan.status === "executing"}
-            notice={actionNotice}
-            onBuild={buildSet}
             onReorder={reorderSet}
-            onPrepare={() => sendSetAction("prepare-transitions")}
-            onActivate={() => sendSetAction("activate")}
-            onRetry={retrySetPlanning}
-            onStart={() => sendSetAction("start")}
           />
           <EventLog events={state.events} />
         </div>
@@ -1161,7 +1067,7 @@ function App() {
             {state.dataSource === "live"
               ? state.autoArmEnabled
                 ? "The target is three future-ready transitions. Ready transitions auto-arm after deck rotation."
-                : "The target is three future-ready transitions. Every ready transition waits for human approval."
+                : "Automation is suspended. Start a reviewed set or recover before resuming Auto arm."
               : "DJ controls are simulated. Crowd observation uses real Meta requests for uploads and while webcam capture is on. Adaptive DJ requires Live Mixxx."}
           </p>
           {state.dataSource === "live" && actionNotice && (
@@ -1199,10 +1105,10 @@ function App() {
             </button>
             <button
               className={`button ${state.autoArmEnabled ? "button--toggle-on" : "button--ghost"}`}
-              disabled={actionPending}
-              onClick={() => void setAutoArm(!state.autoArmEnabled)}
+              disabled={actionPending || state.autoArmEnabled}
+              onClick={() => void setAutoArm(true)}
             >
-              Auto arm {state.autoArmEnabled ? "On" : "Off"}
+              {state.autoArmEnabled ? "Auto arm · Always on" : "Resume Auto arm"}
             </button>
             <button
               className="button button--secondary"
