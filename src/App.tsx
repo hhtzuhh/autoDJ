@@ -3,7 +3,7 @@ import type {BuildResult} from "./playlistRequest";
 import { CrowdWebcam } from "./CrowdWebcam";
 import { useEffect, useMemo, useState } from "react";
 import { event, initialState, tracks } from "./demo";
-import { MetaActivity } from "./MetaActivity";
+import { RollingPlanner } from "./MetaActivity";
 import { CrowdObservation } from "./CrowdObservation";
 import type {
   CopilotState,
@@ -13,6 +13,7 @@ import type {
   PerformanceEvent,
   Track,
   TransitionEdge,
+  TransitionPlan,
 } from "./types";
 
 const waveform = [
@@ -218,51 +219,54 @@ function TrackMini({ track }: { track: Track }) {
   );
 }
 
+function PlanDetails({ plan }: { plan: Partial<Pick<TransitionPlan,
+  "technique" | "sourceCueBeat" | "sourceExitBeat" | "targetEntryBeat" | "transitionMode" | "bars" | "confidence" | "performanceActions">> }) {
+  return <div className="plan-detail-content">
+    <h3>Transition</h3>
+    <dl className="plan-detail-grid">
+      {plan.technique && <div><dt>Technique</dt><dd>{plan.technique.replaceAll("_", " ")}</dd></div>}
+      {plan.sourceCueBeat != null && <div><dt>Cue / prepare</dt><dd>Beat {plan.sourceCueBeat}</dd></div>}
+      {plan.sourceExitBeat != null && <div><dt>{plan.transitionMode === "clean_break" ? "Handoff" : "Mix window"}</dt><dd>
+        {plan.transitionMode === "clean_break" ? `Cut at beat ${plan.sourceExitBeat}`
+          : `Beat ${plan.sourceExitBeat}${plan.bars != null ? `–${plan.sourceExitBeat + plan.bars * 4}` : ""}`}
+      </dd></div>}
+      {plan.targetEntryBeat != null && <div><dt>Target cue</dt><dd>Beat {plan.targetEntryBeat}</dd></div>}
+      {plan.confidence != null && <div><dt>Confidence</dt><dd>{Math.round(plan.confidence * 100)}%</dd></div>}
+    </dl>
+    {plan.sourceExitBeat == null && <p className="panel-details__note">Cue details were not retained for this transition.</p>}
+    <h3>Transition actions</h3>
+    {plan.performanceActions?.length ? <>
+      <p className="panel-details__note">The handoff and its preparation / recovery actions. Beat 0 is the handoff; negative offsets happen before it.</p>
+      <ul className="action-parameters">{plan.performanceActions.map((action, index) => <li key={index}>
+        <code>{action.function}</code> · beat {action.start_beat}
+        {action.deck && ` · ${action.deck} deck`}
+        {action.target_bpm != null && ` → ${action.target_bpm} BPM`}
+        {action.duration_beats != null && ` · ${action.duration_beats} beats`}
+        {action.curve && ` · ${action.curve.replaceAll("_", " ")}`}
+        {action.fade_out_seconds != null && ` · fade ${action.fade_out_seconds}s`}
+      </li>)}</ul>
+    </> : <p className="panel-details__note">No action details recorded for this transition.</p>}
+  </div>;
+}
+
 function PlanPanel({ state }: { state: CopilotState }) {
-  if (!state.plan.sourceTrackId || !state.plan.targetTrackId) return <section className="panel plan-panel">
-    <div className="panel__header"><div><span className="eyebrow">Before playback</span><h2>No active set yet</h2></div></div>
-    <p className="set-builder__message">Build a set from your local songs. After analysis finishes, export the Mixxx playlist and start the set to request its first transition plan.</p>
-    <MetaActivity state={state} />
+  const source = state.queue.find(track => track.id === state.plan.sourceTrackId)
+    ?? state.decks.find(deck => deck.track?.id === state.plan.sourceTrackId)?.track;
+  const target = state.queue.find(track => track.id === state.plan.targetTrackId)
+    ?? state.decks.find(deck => deck.track?.id === state.plan.targetTrackId)?.track;
+  if (!source || !target) return <section className="panel plan-panel" aria-label="AI plan">
+    <div className="panel__header"><div><span className="eyebrow">Selected performance</span><h2>AI plan</h2></div></div>
+    <p className="set-builder__message">No active plan yet. Prepare your set and build a performance plan in Agent flow.</p>
   </section>;
-  const source = state.queue.find((track) => track.id === state.plan.sourceTrackId)!;
-  const target = state.queue.find((track) => track.id === state.plan.targetTrackId)!;
   const isFixture = state.plan.selectedBy === "fixture";
-  const sourceIndex = state.queue.findIndex(
-    (track) => track.id === state.plan.sourceTrackId,
-  );
-  const planningMode = state.plan.planningMode
-    ?? (state.plan.transitionMode === "clean_break"
-      ? "pair_clean_break"
-      : "rolling_abc");
-  const inferredWindowIds = ["rolling_abc", "rolling_abcd"].includes(planningMode) && sourceIndex >= 0
-    ? state.queue.slice(sourceIndex, sourceIndex + (planningMode === "rolling_abcd" ? 4 : 3)).map((track) => track.id)
-    : [state.plan.sourceTrackId, state.plan.targetTrackId];
-  const planningWindow = (state.plan.planningWindowTrackIds ?? inferredWindowIds)
-    .map((trackId) => state.queue.find((track) => track.id === trackId))
-    .filter(Boolean) as Track[];
-  const futurePlanningWindow = (state.plan.futurePlanningWindowTrackIds ?? [])
-    .map((trackId) => state.queue.find((track) => track.id === trackId))
-    .filter(Boolean) as Track[];
-  const activeEdge = state.transitions.find(
-    (edge) => edge.sourceTrackId === state.plan.sourceTrackId
-      && edge.targetTrackId === state.plan.targetTrackId,
-  );
-  const followingTrack = sourceIndex >= 0 ? state.queue[sourceIndex + 2] : undefined;
-  const inferredFollowingDraft = followingTrack
-    ? state.transitions.find(
-      (edge) => edge.sourceTrackId === state.plan.targetTrackId
-        && edge.targetTrackId === followingTrack.id
-        && edge.selectedBy === "meta"
-        && edge.status === "feasible",
-    )
-    : undefined;
-  const scopeLabel = planningMode === "rolling_abcd" || planningMode === "rolling_tail"
-    ? `1 plan · ${Math.max(1, planningWindow.length - 1)} transitions`
-    : planningMode === "rolling_abc"
-      ? "Legacy 2-transition window"
-    : planningMode === "promoted_rolling_draft"
-      ? "Promoted rolling draft"
-      : "2-track clean-break pair";
+  const actions = state.plan.performanceActions ?? [];
+  const activeEdge = state.transitions.find(edge => edge.sourceTrackId === source.id && edge.targetTrackId === target.id);
+  const actionTitle = (action: (typeof actions)[number]) => {
+    if (action.function === "ramp_tempo") return `${action.deck === "source" ? "Adjust tempo" : "Return to native tempo"} → ${action.target_bpm} BPM`;
+    if (action.function === "crossfade") return action.curve === "late_cut" ? "Late cut" : "Crossfade";
+    if (action.function === "cut_to_next") return action.fade_out_seconds ? "Fade out & cut" : "Clean cut";
+    return action.function.replaceAll("_", " ");
+  };
   const isTerminal = ["completed", "invalidated", "cancelled"].includes(
     state.plan.status,
   );
@@ -294,86 +298,13 @@ function PlanPanel({ state }: { state: CopilotState }) {
         <TrackMini track={target} />
       </div>
 
-      <div className="planning-scope">
-        <div className="planning-scope__header">
-          <span>Meta decision scope</span>
-          <strong>{scopeLabel}</strong>
-        </div>
-        <div className="planning-scope__tracks">
-          {planningWindow.map((track, index) => (
-            <span key={track.id}>
-              {index > 0 && <i>→</i>}
-              <b>{track.title}</b>
-            </span>
-          ))}
-        </div>
-        <p>
-          {activeEdge?.candidateCount ?? "—"} local candidates → 1 Meta decision.
-          {planningMode === "rolling_abcd" || planningMode === "rolling_tail"
-            ? " The first edge is executable; the remaining edges are preserved as Meta plans awaiting promotion."
-            : state.plan.followingDraft || inferredFollowingDraft
-            ? " The first edge is executable; the second edge is preserved as a Meta draft, not armed."
-            : planningMode === "promoted_rolling_draft"
-              ? " This executable plan was promoted from the prior three-track Meta decision."
-              : " Only this edge was decided by Meta; later edges are analyzer standby only."}
-        </p>
-        {(state.plan.activeTransitionLocked || (state.plan.futurePlanStatus && state.plan.futurePlanStatus !== "idle")) && (
-          <div className="planning-scope__header">
-            <span>{state.plan.activeTransitionLocked ? "Active edge locked" : "Future transitions"}</span>
-            <strong>
-              Future window {state.plan.futurePlanStatus ?? "idle"}
-            </strong>
-          </div>
-        )}
-        {futurePlanningWindow.length > 0 && (
-          <div className="planning-scope__tracks">
-            {futurePlanningWindow.map((track, index) => (
-              <span key={`future-${track.id}`}>
-                {index > 0 && <i>→</i>}
-                <b>{track.title}</b>
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <MetaActivity state={state} />
-
-      {!!state.plan.performanceActions?.length && <div className="planning-scope">
-        <strong>Performance plan · one Meta decision</strong>
-        <p>Beat 0 is the handoff cue. Negative beats prepare the outgoing song; later actions shape the incoming song.</p>
-        {state.plan.performanceActions.map((action, index) => <p key={index}>
-          <b>{action.function.replaceAll("_", " ")}</b> · beat {action.start_beat}
-          {action.deck && ` · ${action.deck} deck`}
-          {action.target_bpm != null && ` → ${action.target_bpm} BPM`}
-          {action.duration_beats != null && ` · ${action.duration_beats / 4} bars`}
-          {action.curve && ` · ${action.curve.replaceAll("_", " ")}`}
-          {action.fade_out_seconds != null && ` · fade ${action.fade_out_seconds}s`}
-        </p>)}
-      </div>}
-      <div className="cue-grid">
-        {state.plan.technique && <div><span>Technique</span><strong>{state.plan.technique.replaceAll("_", " ")}</strong></div>}
-        <div>
-          <span>Cue / prepare</span>
-          <strong>Beat {state.plan.sourceCueBeat}</strong>
-        </div>
-        <div>
-          <span>{state.plan.transitionMode === "clean_break" ? "Handoff" : "Mix window"}</span>
-          <strong>
-            {state.plan.transitionMode === "clean_break"
-              ? `Cut at beat ${state.plan.sourceExitBeat}`
-              : `Beat ${state.plan.sourceExitBeat}–${state.plan.sourceExitBeat + state.plan.bars * 4}`}
-          </strong>
-        </div>
-        <div>
-          <span>Target cue</span>
-          <strong>Beat {state.plan.targetEntryBeat}</strong>
-        </div>
-        <div>
-          <span>Confidence</span>
-          <strong>{Math.round(state.plan.confidence * 100)}%</strong>
-        </div>
-      </div>
+      {actions.length > 0 && <ol className="performance-timeline" aria-label="Selected transition actions">
+        {actions.map((action, index) => <li key={index}>
+          <span className="performance-timeline__stage">{action.start_beat < 0 ? "Before handoff" : action.start_beat === 0 ? "Handoff" : action.function === "ramp_tempo" ? "After blend" : "During blend"}</span>
+          <strong>{actionTitle(action)}</strong>
+          <small>{action.duration_beats != null ? `${action.duration_beats / 4} bars` : action.fade_out_seconds ? `${action.fade_out_seconds}s fade` : "Direct handoff"}</small>
+        </li>)}
+      </ol>}
 
       <div className="decision-card">
         <div className="decision-card__icon"><Icon name="spark" /></div>
@@ -388,6 +319,12 @@ function PlanPanel({ state }: { state: CopilotState }) {
           )}
         </div>
       </div>
+
+      <details className="panel-details">
+        <summary>Plan details</summary>
+        <PlanDetails plan={state.plan} />
+        <p className="panel-details__note">{activeEdge?.candidateCount ?? "—"} local candidates · {isFixture ? "Demo fixture" : state.plan.selectedBy === "meta" ? "Selected by Meta" : "Local planning"}</p>
+      </details>
 
       {state.plan.invalidationReason && (
         <div className="warning-callout">
@@ -504,6 +441,7 @@ function QueuePanel({
               {transition && (
                 <TransitionReadiness
                   edge={transition}
+                  plan={transition.sourceTrackId === state.plan.sourceTrackId && transition.targetTrackId === state.plan.targetTrackId ? state.plan : undefined}
                   insideBuffer={bufferSlot >= 0 && bufferSlot < liveBuffer.length - 1}
                   currentBeat={state.decks.find(
                     (deck) => deck.playing && deck.track?.id === transition.sourceTrackId,
@@ -514,14 +452,6 @@ function QueuePanel({
           );
         })}
       </div>
-      <div className="queue-note">
-        <Icon name="shield" />
-        <p>
-          {prepared
-            ? "Queue reordering is temporarily locked while the rolling transition planner is being validated."
-            : "Only adjacent pairs are analyzed. Reordering invalidates affected edges."}
-        </p>
-      </div>
     </section>
   );
 }
@@ -530,61 +460,61 @@ function TransitionReadiness({
   edge,
   currentBeat,
   insideBuffer = true,
+  plan,
 }: {
   edge: TransitionEdge;
   currentBeat?: number | null;
   insideBuffer?: boolean;
+  plan?: TransitionPlan;
 }) {
-  const selectedBy = edge.status !== "planning" && edge.selectedBy === "meta"
-    ? "Meta"
-    : null;
-  const nextTiming = edge.sourceExitBeat != null && edge.targetEntryBeat != null
-    ? `Beat ${edge.sourceExitBeat} → ${edge.targetEntryBeat}${edge.bars ? ` · ${edge.bars} bars` : ""}`
-    : null;
   const beatsToFinalArm = currentBeat != null && edge.sourceExitBeat != null
     ? edge.sourceExitBeat - 16 - currentBeat
     : null;
   const usesMeta = edge.selectedBy === "meta";
   const displayStatus = edge.status === "completed"
-      ? usesMeta ? "Meta completed" : "Completed"
+      ? "Completed"
       : edge.status === "planning"
       ? "Calling Meta…"
       : edge.status === "planned"
-        ? "Meta planned · not armed"
+        ? "Planned · not armed"
       : edge.status === "needs_human"
         ? "Needs human"
         : !usesMeta
           ? insideBuffer ? "Meta not planned" : "Waiting beyond buffer"
         : edge.status === "ready"
-          ? "Meta plan ready"
+          ? "Plan ready"
           : edge.status === "armed"
-            ? "Meta armed"
+            ? "Armed"
             : edge.status === "executing"
-              ? "Meta executing"
+              ? "Executing"
               : edge.status === "feasible"
                   ? "Future draft"
                   : edge.status.replaceAll("_", " ");
   return (
     <div className={`transition-edge transition-edge--${edge.status}`}>
-      <i />
-      <span>{displayStatus}</span>
-      {selectedBy && <span>{selectedBy}</span>}
-      {nextTiming && <small>{nextTiming}</small>}
-      {usesMeta && edge.metaOrigin && <small title={`Request ${edge.metaOrigin.requestId} · candidate ${edge.metaOrigin.candidateId ?? "pair selection"}`}>
-        Plan from Meta · {new Date(edge.metaOrigin.selectedAt).toLocaleTimeString("en-GB")}
-        {" · "}{edge.metaOrigin.requestId.slice(-8)}
-      </small>}
-      {usesMeta && !edge.metaOrigin && <small>Earlier Meta decision · request history unavailable</small>}
-      <small>{edge.candidateCount} candidates</small>
+      <details className="queue-plan-details">
+        <summary><i aria-hidden="true" /><span>{displayStatus}</span>
+          {plan?.technique && <span className="queue-plan-technique">{plan.technique.replaceAll("_", " ")}</span>}
+          <span className="queue-plan-label">Plan details</span>
+        </summary>
+        <PlanDetails plan={plan ?? edge} />
+        <div className="queue-plan-reason">
+          <h3>Decision</h3>
+          {(plan?.reason ?? edge.reason) && <p>{(plan?.reason ?? edge.reason)?.replaceAll("_", " ")}</p>}
+          <p className="panel-details__note">{edge.candidateCount} local candidates · {usesMeta ? "Selected by Meta" : edge.selectedBy === "fixture" ? "Demo fixture" : "No Meta selection"}</p>
+          {usesMeta && edge.metaOrigin && <p className="panel-details__note">
+            {edge.metaOrigin.model} · {new Date(edge.metaOrigin.selectedAt).toLocaleTimeString("en-GB")}
+            <br />Request {edge.metaOrigin.requestId} · candidate {edge.metaOrigin.candidateId ?? "pair selection"}
+          </p>}
+          {usesMeta && !edge.metaOrigin && <p className="panel-details__note">Earlier Meta decision · request history unavailable</p>}
+        </div>
+      </details>
       {beatsToFinalArm != null && ["planning", "planned"].includes(edge.status) && (
         <small className={beatsToFinalArm <= 32 ? "is-warning" : ""}>
           {beatsToFinalArm > 0
             ? `${beatsToFinalArm} beats until final safe arm`
             : "Final safe arm point passed"}
         </small>
-      )}
-      {edge.reason && (usesMeta || edge.status === "needs_human") && (
-        <small title={edge.reason}>{edge.reason.replaceAll("_", " ")}</small>
       )}
     </div>
   );
@@ -1053,6 +983,7 @@ function App() {
             disabled={actionPending || state.plan.status === "executing"}
             onReorder={reorderSet}
           />
+          <RollingPlanner state={state} />
           <EventLog events={state.events} />
         </div>
         <CrowdWebcam live={state.dataSource === "live" && state.connected} tracks={state.queue} onTelemetry={setWebcamTelemetry} />

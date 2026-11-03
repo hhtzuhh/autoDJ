@@ -36,11 +36,28 @@ export function TransitionSetupDialog({open, onClose, state, disabled, onAction}
     <div className="playlist-dialog__header"><div><span className="eyebrow">From selected songs to Mixxx</span><h2 id="transition-setup-title">Prepare & start your set</h2></div>
       <button type="button" className="playlist-dialog__close" onClick={onClose} aria-label="Close set preparation">×</button></div>
     <p className="flow-empty">{b?.queue.length ?? 0} selected songs · order is preserved. Prepare finds candidates for all adjacent pairs. Build plans the first rolling window: up to 4 songs / 3 handoffs. Review it before starting playback; later windows are planned as the set progresses.</p>
-    <details><summary>Available DJ actions and transition techniques</summary>
-      <p>Playback actions are optional; every song change needs one handoff. Meta chooses timing, common BPM and EQ parameters in one planning call.</p>
-      {b?.actionCatalog && Object.entries(b.actionCatalog).map(([name, a]) => <p key={name}><strong>{name.replaceAll("_", " ")}</strong> · {a.purpose} {a.timing} <small>{a.tradeoff}</small></p>)}
-      <p>Meta chooses one technique for each transition in its planning window. Availability depends on the cue pair and tempo compatibility. These are control templates; musical quality still needs listening.</p>
-      {b?.techniques?.map(t => <p key={t.id}><strong>{t.id.replaceAll("_", " ")}</strong> · {t.description} <small>{t.tradeoff}</small></p>)}
+    <details className="transition-catalog">
+      <summary>Available transition techniques{b?.techniques?.length ? ` (${b.techniques.length})` : ""}</summary>
+      <p>Meta chooses a technique and its action parameters for each song change in one planning call. Available choices depend on the cue pair and tempo compatibility.</p>
+      <ul className="transition-catalog__techniques">
+        {b?.techniques?.map(t => <li key={t.id}><strong>{t.id.replaceAll("_", " ")}</strong><p>{
+          t.id === "bass_swap" ? "Crossfade while exchanging the two songs’ low EQ over the selected interval."
+            : t.id === "bass_dip" ? "Crossfade with a bass-light moment, then restore the incoming low end."
+            : t.description
+        }</p></li>)}
+      </ul>
+      {!b?.techniques?.length && <p className="flow-empty">Technique catalog unavailable. Connect to the live service to load it.</p>}
+      <p className="flow-section__note">Tempo ramps can prepare or finish a transition. Independent in-track performance actions are not implemented yet. Musical quality still needs listening.</p>
+      <details className="panel-details"><summary>Technical details · action functions{b?.actionCatalog ? ` (${Object.keys(b.actionCatalog).length})` : ""}</summary>
+        <p>These functions implement the techniques above. Meta returns one action list per transition; EQ actions are optional and tempo ramps are required when the selected common BPM changes a song’s speed.</p>
+        <ul className="transition-catalog__mapping">
+          <li>Crossfade / late cut → <code>crossfade</code> with a linear / late-cut curve.</li>
+          <li>Bass swap / bass dip → <code>crossfade</code> plus <code>bass_swap</code> / <code>bass_dip</code>.</li>
+          <li>Clean cut / fade out cut → <code>cut_to_next</code> with a 0 / 0.5-second fade.</li>
+          <li>Tempo adjustment → <code>ramp_tempo</code> before or after a beat-synced handoff.</li>
+        </ul>
+        {b?.actionCatalog && Object.entries(b.actionCatalog).map(([name, a]) => <p key={name}><strong><code>{name}</code></strong> · {a.purpose} {a.timing} <small>{a.tradeoff}</small></p>)}
+      </details>
     </details>
     <ol className="set-setup-steps">
       <li><strong>Prepare adjacent transitions</strong><p>Reuse local analysis and pair caches for each neighboring song. This does not call Meta or start playback.</p>

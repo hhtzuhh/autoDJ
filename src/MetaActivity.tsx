@@ -1,29 +1,26 @@
 import { useEffect, useState } from "react";
 import type { CopilotState } from "./types";
+import {rollingPlannerView} from "./rollingPlanner";
 
 const labels = {
   calling: "Calling Meta",
-  succeeded: "Applied",
+  succeeded: "Succeeded",
   timeout: "Timed out",
   failed: "Failed",
   discarded: "Discarded · plan changed",
 };
 
-export function MetaActivity({ state }: { state: CopilotState }) {
+export function RollingPlanner({ state }: { state: CopilotState }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  if (state.dataSource !== "live") return null;
   const calls = state.plan.metaCalls ?? [];
-  const sourceIndex = state.queue.findIndex(track => track.id === state.plan.sourceTrackId);
-  const targetDepth = sourceIndex < 0 ? 0 : Math.min(3, state.queue.length - sourceIndex - 2);
-  const ready = state.transitions.filter(edge => {
-    const index = state.queue.findIndex(track => track.id === edge.sourceTrackId);
-    return index > sourceIndex && index <= sourceIndex + targetDepth
-      && edge.status === "ready" && edge.selectedBy === "meta";
-  }).length;
+  const view = rollingPlannerView(state);
+  const {ready, futureDepth: targetDepth, latestCall} = view;
+  const elapsed = latestCall ? Math.max(0, Math.floor(((latestCall.finishedAt ?? now) - latestCall.startedAt) / 1000)) : 0;
+  const offline = state.dataSource === "live" && !state.connected;
   const status = state.plan.futurePlanStatus ?? "idle";
   const timing = state.plan.refillTiming;
   const error = state.plan.futurePlanError;
@@ -41,7 +38,7 @@ export function MetaActivity({ state }: { state: CopilotState }) {
     const elapsed = Math.max(0, Math.floor(((call.finishedAt ?? now) - call.startedAt) / 1000));
     return <li key={call.id} id={call.id} className={`meta-call meta-call--${call.status}`}>
       <div className="meta-call__heading">
-        <strong>{call.scope === "future_buffer" ? "Buffer" : "Current plan"} · {edges}</strong>
+        <strong>{call.scope === "future_buffer" ? "Future window" : call.scope === "crowd_adaptive" ? "Crowd adaptation" : "Initial / current window"} · {edges}</strong>
         <span>{labels[call.status]}</span>
       </div>
       <p className="meta-call__route">{route}</p>
@@ -63,29 +60,51 @@ export function MetaActivity({ state }: { state: CopilotState }) {
       {call.status === "failed" && <p className="meta-call__reason">{call.detail ?? "The response could not be used."}</p>}
     </li>;
   };
-  return <section className="meta-activity" aria-label="Meta call activity">
-    <div className="meta-activity__header">
-      <h3>Meta calls</h3>
-      <strong className={ready < targetDepth ? "meta-activity__short" : "meta-activity__full"}>
-        Future buffer {ready}/{targetDepth} ready
+  return <section className="panel rolling-panel" aria-label="Rolling planner">
+    <div className="panel__header">
+      <div><span className="eyebrow">Planning ahead</span><h2>Rolling planner</h2></div>
+      <strong className={`count-badge ${ready < targetDepth ? "meta-activity__short" : "meta-activity__full"}`}>
+        {offline ? "Disconnected" : !view.tracks.length ? "Not started" : targetDepth ? `${ready}/${targetDepth} future ready` : "Queue tail"}
       </strong>
     </div>
+    {state.dataSource === "simulation" && <p className="meta-activity__warning">Simulation · no live Meta requests.</p>}
     <p className="meta-activity__summary" aria-live="polite">
-      {targetDepth === 0 ? "Queue tail · no later transitions to plan."
-        : status === "planning" ? "Planning in the background · existing valid plans stay available."
-        : status === "degraded" ? `Buffer degraded · ${state.plan.futureRetryInSeconds ? `retry in ${Math.ceil(state.plan.futureRetryInSeconds)}s` : "waiting for the next valid planning opportunity"}.`
-        : status === "ready" ? "The future window is ready."
-        : "No background request running."}
+      {offline ? "Showing the last observed planning state."
+        : view.activeCall ? "Meta is planning a window. Retained decisions are shown below."
+        : !view.tracks.length ? "Build a performance plan in Agent flow to start the first window."
+        : targetDepth === 0 ? "End of queue · no later transitions to prepare."
+        : status === "degraded" ? `Future planning needs attention${state.plan.futureRetryInSeconds ? ` · retry in ${Math.ceil(state.plan.futureRetryInSeconds)}s` : ""}.`
+        : ready === targetDepth ? "Future transitions are ready for promotion."
+        : "Waiting for the next planning opportunity."}
     </p>
-    <p className="meta-activity__summary">Request history below records attempts, not whether an existing transition plan is still valid. See each queue edge for its retained decision.</p>
-    {noCandidates && <p className="meta-activity__warning">No time-consistent local window was found. No Meta request was sent for this attempt.</p>}
-    {timing?.status === "at_risk" && targetDepth > 0 && <p className="meta-activity__warning">
-      Short refill window: about {timing.minimumRunwaySeconds}s available vs {timing.budgetSeconds}s reserved for a timeout and retry. Buffer may run low.
-    </p>}
-    {calls.length === 0 ? <p className="meta-activity__summary">No Meta calls recorded in this bridge session.</p>
-      : <><ol className="meta-activity__calls">{calls.slice(0, 3).map(renderCall)}</ol>
-        {calls.length > 3 && <details><summary>Earlier calls ({calls.length - 3})</summary>
-          <ol className="meta-activity__calls">{calls.slice(3).map(renderCall)}</ol>
-        </details>}</>}
+    {view.tracks.length > 0 && <div className="rolling-window">
+      <span className="eyebrow">{view.windowLabel}</span>
+      <div className="rolling-window__route" aria-label="Planning window songs">
+        {view.tracks.map((track, index) => <span key={`${track.id}-${index}`} title={track.title}>
+          {index > 0 && <i aria-hidden="true">→</i>}<b>{track.position || "—"}</b><span>{track.title}</span>
+        </span>)}
+      </div>
+      <ol className="rolling-window__edges" aria-label="Transition planning status">
+        {view.edges.map(edge => <li key={`${edge.source.id}-${edge.target.id}`}>
+          <span title={`${edge.source.title} → ${edge.target.title}`}>Song {edge.source.position || "—"} → {edge.target.position || "—"}</span>
+          <strong className={`rolling-state rolling-state--${edge.tone}`}>{edge.label}</strong>
+        </li>)}
+      </ol>
+      {state.plan.activeTransitionLocked && <p className="panel-details__note">Current handoff locked · replanning applies to later transitions.</p>}
+    </div>}
+    {latestCall ? <div className={`meta-call meta-call--${latestCall.status} latest-call`} aria-label="Latest Meta request">
+      <div className="meta-call__heading"><strong>Latest Meta request</strong><span>{labels[latestCall.status]}</span></div>
+      <div className="meta-call__timing"><span>{elapsed}s elapsed</span><span>{latestCall.model}</span></div>
+      {latestCall.status === "calling" && latestCall.phase && <p className="meta-activity__summary">{phaseLabels[latestCall.phase]}</p>}
+    </div> : <p className="meta-activity__summary">No Meta requests in this session.</p>}
+    {noCandidates && <p className="meta-activity__warning">No feasible future window yet. No Meta request was sent for this attempt.</p>}
+    {timing?.status === "at_risk" && targetDepth > 0 && <p className="meta-activity__warning">Short planning window · the future buffer may run low.</p>}
+    <details className="panel-details">
+      <summary>Request history ({calls.length})</summary>
+      <p className="panel-details__note">These are API attempts. Transition readiness is shown above; a successful request does not mean playback executed.</p>
+      {timing && <p className="panel-details__note">Refill runway: {timing.minimumRunwaySeconds ?? "unknown"}s · timeout and retry budget: {timing.budgetSeconds}s.</p>}
+      {error && <p className="meta-activity__warning">{error}</p>}
+      {calls.length > 0 && <ol className="meta-activity__calls">{calls.map(renderCall)}</ol>}
+    </details>
   </section>;
 }
