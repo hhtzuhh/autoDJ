@@ -84,7 +84,7 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
     </div>
     {mode === "new" ? <>
       <div className="playlist-chat" role="log" aria-label="Playlist conversation" aria-live="polite">
-        <div className="playlist-message"><strong>Playlist assistant</strong><p>Tell me the playlist you want. I’ll complete All-In-One + DSP and Muse Spark music descriptions for every song in your library, reusing existing results. Once both stages succeed, Meta will select and order your tracks. Then prepare transitions and export your playlist before starting the set.</p></div>
+        <div className="playlist-message"><strong>Playlist assistant</strong><p>Tell me the playlist you want. I’ll complete Local audio analysis and Muse Spark music descriptions for every song in your library, reusing existing results. Once both stages succeed, Meta will select and order your tracks. Then prepare transitions and export your playlist before starting the set.</p></div>
         {sent && <div className="playlist-message playlist-message--user"><strong>You · {sent.count} tracks</strong><p>{sent.prompt}</p></div>}
         {sent && <div className="playlist-message"><strong>{match && b?.model ? b.model : "Preparation status"}</strong>
           <p>{error ? error : !match ? "Submitting your build request…"

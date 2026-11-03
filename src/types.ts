@@ -59,7 +59,7 @@ export interface PreparedTrack {
     startedAt: string;
     finishedAt: string | null;
     durationSeconds: number | null;
-    neuralNet: "cache" | "computed" | "unverified";
+    neuralNet: "cache" | "computed" | "unverified" | "not_used";
   } | null;
   id: string;
   title: string;

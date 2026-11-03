@@ -42,7 +42,7 @@ export function LibraryDialog({open, mode, onClose, state, disabled, disconnecte
     finally {setSending(false);}
   };
   return <dialog ref={dialog} className="playlist-dialog library-dialog" aria-labelledby="library-dialog-title" onCancel={onClose} onClose={onClose}>
-    <div className="playlist-dialog__header"><div><span className="eyebrow">{analysis ? "02 · All-In-One + local DSP" : "01 · Local files"}</span>
+    <div className="playlist-dialog__header"><div><span className="eyebrow">{analysis ? "02 · Local audio analysis" : "01 · Local files"}</span>
       <h2 id="library-dialog-title">{analysis ? "Analyze library" : "All library songs"}</h2></div>
       <button type="button" className="playlist-dialog__close" onClick={onClose} aria-label="Close library dialog">×</button></div>
     <p className="playlist-dialog__library">{rows.length} songs · <code>local-assets/samples/</code></p>

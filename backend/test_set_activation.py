@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from analysis_config import analysis_root
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -56,7 +57,7 @@ class SetActivationTest(unittest.TestCase):
         with TemporaryDirectory() as raw:
             root = Path(raw)
             library = root / "local-assets/samples"
-            analysis_root = root / "artifacts/time-map"
+            fixture_analysis_root = analysis_root(root)
             library.mkdir(parents=True)
             ids = []
             for index in range(3):
@@ -64,7 +65,7 @@ class SetActivationTest(unittest.TestCase):
                 source.write_bytes(f"audio-{index}".encode())
                 track_id = hashlib.sha256(source.read_bytes()).hexdigest()
                 ids.append(track_id)
-                output = analysis_root / track_id / "track-analysis-v1.json"
+                output = fixture_analysis_root / track_id / "track-analysis-v1.json"
                 output.parent.mkdir(parents=True)
                 output.write_text(
                     json.dumps(

@@ -9,15 +9,16 @@ const node = (id: string, title: string, owner: string, status: NodeStatus, labe
 export function analysisTrackRows(tracks: PreparedTrack[]) {
   return tracks.map((track, index) => {
     const run = track.analysisRun;
+    const dsp = run?.engine === "essentia_dsp" || track.analysisSummary?.analysisBackend === "essentia_dsp";
     const existing = track.analysisStatus === "ready" && ["cache", "available"].includes(track.analysisOrigin ?? "");
     const neural = !existing && run?.status === "completed" && run.neuralNet === "computed";
     const neuralCache = !existing && run?.neuralNet === "cache";
     const route = existing ? "metadata" : neural ? "neural" : run || track.analysisOrigin === "computed" ? "pipeline" : "unknown";
-    const source = existing ? "Existing analysis metadata" : neural ? "Neural net + DSP" : neuralCache ? "Cached neural result + DSP"
+    const source = dsp ? "Essentia + local DSP" : existing ? "Existing analysis metadata" : neural ? "Neural net + DSP" : neuralCache ? "Cached neural result + DSP"
       : run?.engine === "all_in_one_plus_dsp" ? "All-In-One + DSP" : run?.engine === "custom" ? "Custom analyzer"
       : track.analysisOrigin === "computed" ? "Computed analysis · engine unrecorded"
       : track.analysisStatus === "ready" ? "Existing result · origin unrecorded" : "Awaiting analyzer";
-    const note = existing ? track.analysisOrigin === "cache" ? "Reused in this build; no new analysis job" : "Available on disk; original run unrecorded"
+    const note = dsp ? `${existing ? "Cached DSP analysis" : "No neural model used"}; downbeats estimated, timing unreviewed` : existing ? track.analysisOrigin === "cache" ? "Reused in this build; no new analysis job" : "Available on disk; original run unrecorded"
       : neural ? "Neural inference completed in the recorded job" : neuralCache ? "Network output reused; local DSP recomputed"
       : run ? "Neural inference is not confirmed until the job completes"
       : "No per-job execution evidence recorded";
@@ -60,9 +61,9 @@ export function deriveAgentFlow(state: CopilotState, webcam: WebcamFlowState | n
     node("curation", "Select & order", b?.selectionSource?.kind === "mixxx_playlist" ? "MANUAL · MIXXX PLAYLIST" : "META · MUSE SPARK", preparing ? "running" : b?.error ? "error" : ["library_analysis", "music_features"].includes(b?.buildPhase ?? "") ? "waiting" : curation?.status === "failed" || curation?.status === "truncated" ? "error" : selectedTracks.length ? "done" : "idle",
       preparing ? "Selecting tracks…" : b?.error ? "Build blocked" : b?.buildPhase === "music_features" ? "Waiting for Muse descriptions" : b?.buildPhase === "library_analysis" ? "Waiting for library analysis" : selectedTracks.length ? `${selectedTracks.length} tracks ${b?.selectionSource?.kind === "mixxx_playlist" ? "imported · order preserved" : "selected"}` : "Build / choose playlist",
       b?.selectionSource?.kind === "mixxx_playlist" ? "Manual playlist import preserves the supplied song order. No Meta selection call. Missing analyses must be completed before transition preparation." : "Meta receives the analyzed library: measured BPM, structure and DSP summaries. All songs must also have Muse descriptions, kept separate from file tags and measured DSP. Relative energy is not a cross-song energy ranking.", {request: b?.prompt, reason: b?.reason, call: curation ?? null, error: b?.error, selected: selectedTracks.map(t => t.title)}),
-    node("analysis", "Analyze library", "ALL-IN-ONE + LOCAL DSP", failedTracks.length ? "error" : runningTracks.length ? "running" : readyTracks.length && readyTracks.length === tracks.length ? "done" : tracks.length ? "waiting" : "idle",
+    node("analysis", "Analyze library", "LOCAL AUDIO ANALYZER", failedTracks.length ? "error" : runningTracks.length ? "running" : readyTracks.length && readyTracks.length === tracks.length ? "done" : tracks.length ? "waiting" : "idle",
       runningTracks.length ? `${runningTracks.length} analyzing · ${readyTracks.length}/${tracks.length} ready` : `${readyTracks.length}/${tracks.length} ready${cached ? ` · ${cached} cached` : ""}${available ? ` · ${available} existing metadata` : ""}`,
-      `Beat grid, structure, bar features and cue candidates. ${cached} metadata results reused in the recorded build; ${available} already available without original run history; ${computed} pipeline results computed. See the track table for confirmed neural inference versus internal cache reuse.`,
+      `Beat grid, structure, bar features and cue candidates. ${cached} metadata results reused in the recorded build; ${available} already available without original run history; ${computed} pipeline results computed. See each track for its backend and timing review status; DSP downbeats are estimates.`,
       tracks.map(t => ({track: t.title, status: t.analysisStatus, origin: t.analysisOrigin ?? "unknown", bpm: t.bpm, analysisSummary: t.analysisSummary}))),
     node("pairs", "Prepare transitions", "LOCAL PAIR ANALYZER", preparing ? "waiting" : blockedEdges.length ? "error" : edges.some(e => e.status === "analyzing") ? "running" : edges.length && readyEdges.length === edges.length ? "done" : selectedTracks.length ? "waiting" : "idle",
       `${readyEdges.length}/${Math.max(0, selectedTracks.length - 1)} pairs ready${blockedEdges.length ? ` · ${blockedEdges.length} blocked` : ""}`,

@@ -26,6 +26,8 @@ from transition_techniques import TECHNIQUES
 from performance_actions import ACTION_CATALOG, tempo_bounds
 from in_track_actions import IN_TRACK_CATALOG
 from transition_pipeline import AnalysisCatalog, PairAnalysisCache, adjacent_pairs, utc_now
+from analysis_config import analysis_root, selected_backend
+from track_analyzer import run_for_product
 from music_features import MusicFeatures
 from playlist_import import preview_playlist
 
@@ -68,7 +70,10 @@ def analysis_summary(analysis: dict[str, Any]) -> dict[str, Any]:
         "relativeEnergyByThird": [average(bars[len(bars)*i//3:len(bars)*(i+1)//3], "rms_normalized") for i in range(3)],
         "meanLowFrequencyRatio": average(bars, "low_ratio"),
         "energyBasis": "within_track_normalized_rms_not_cross_track_perceived_energy",
-        "sectionLabels": "weak_model_predictions",
+        "sectionLabels": analysis.get("provenance", {}).get("semantic_section_labels", "weak_model_predictions"),
+        "analysisBackend": analysis.get("provenance", {}).get("backend"),
+        "timingReviewStatus": analysis.get("rhythm", {}).get("timing_review_status", "unreviewed"),
+        "downbeatReviewStatus": analysis.get("rhythm", {}).get("downbeat_review_status", "unreviewed"),
         "genreSource": "file_tags_only",
     }
 
@@ -258,7 +263,8 @@ class SetBuilderService:
         self.workspace = workspace.resolve()
         self.data_root = (data_root or workspace).resolve()
         self.library_root = (library_root or self.data_root / "local-assets/samples").resolve()
-        self.analysis_root = self.data_root / "artifacts/time-map"
+        self.analysis_backend = selected_backend()
+        self.analysis_root = analysis_root(self.data_root, self.analysis_backend)
         self.pair_root = self.data_root / "artifacts/live-performance/dashboard-pairs"
         self.state_path = self.data_root / "artifacts/live-performance/set-builder-state-v1.json"
         self.saved_root = self.data_root / "artifacts/live-performance/saved-sets"
@@ -275,7 +281,7 @@ class SetBuilderService:
         self.curator = curator or self._meta_curator
         self.post_curator = post_curator or self._meta_post_curator
         self.analyzer = analyzer or self._run_analyzer
-        self.analysis_engine = "custom" if analyzer else "all_in_one_plus_dsp"
+        self.analysis_engine = "custom" if analyzer else "all_in_one_plus_dsp" if self.analysis_backend == "all_in_one" else "essentia_dsp"
         self.music_extractor = MusicFeatures(self.workspace, self.data_root, music_transport)
         self.music_results = {t: self.music_extractor.load(t) for t in self.catalog}
         self.pair_builder = pair_builder or self._build_pair
@@ -312,11 +318,22 @@ class SetBuilderService:
             "preparationReady": False,
             "postAnalysisPlanning": "idle",
             "pairAnalysisVersion": PAIR_VERSION,
+            "analysisBackend": self.analysis_backend,
         }
         if self.state_path.exists():
             saved = json.loads(self.state_path.read_text(encoding="utf-8"))
             saved_ids = [str(value) for value in saved.get("orderedTrackIds", [])]
             if saved_ids and all(track_id in self.catalog for track_id in saved_ids):
+                backend_changed = saved.get("analysisBackend", "all_in_one") != self.analysis_backend
+                if backend_changed:
+                    # Preserve the chosen songs, but require explicit reanalysis /
+                    # preparation. No old plan or queued Meta job is resumed.
+                    state.update(orderedTrackIds=saved_ids,
+                                 queueRevision=int(saved.get("queueRevision", 0)) + 1,
+                                 buildPhase="library_ready", selectionOnly=True,
+                                 transitionsRequested=False,
+                                 analysisBackend=self.analysis_backend)
+                    return state
                 pair_version_changed = saved.get("pairAnalysisVersion") != PAIR_VERSION
                 state.update(saved)
                 for run in state.get("analysisRuns", {}).values():
@@ -381,20 +398,8 @@ class SetBuilderService:
         raise RuntimeError("Meta curator did not complete")
 
     def _run_analyzer(self, track: CatalogTrack) -> dict[str, Any]:
-        python = self.workspace / "experiments/time-map/.venv/bin/python"
-        script = self.workspace / "experiments/time-map/unified_analysis.py"
         output = self.analysis_root / track.id / "track-analysis-v1.json"
-        # All-In-One itself reuses source.json unless --overwrite is requested.
-        # Running unified_analysis.py therefore does not always run the network.
-        neural_cached = (self.analysis_root / track.id / "allin1-raw/source.json").is_file()
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with (output.parent / "analyzer.log").open("a", encoding="utf-8") as log:
-            subprocess.run(
-                [str(python), str(script), str(track.path), "--output", str(output),
-                 "--work-directory", str(output.parent), "--device", "cpu", "--limit", "5"],
-                check=True, cwd=str(output.parent), stdout=log, stderr=subprocess.STDOUT,
-            )
-        return {"neuralNet": "cache" if neural_cached else "computed"}
+        return run_for_product(track.path, output, self.analysis_backend, self.workspace)
 
     @staticmethod
     def _tempo_compatible(source: CatalogTrack, target: CatalogTrack) -> bool:
@@ -439,6 +444,7 @@ class SetBuilderService:
         return result.candidate_count, reason
 
     def _persist(self) -> None:
+        self.state["analysisBackend"] = self.analysis_backend
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_suffix(".json.tmp")
         temporary.write_text(
@@ -758,7 +764,7 @@ class SetBuilderService:
             if len(set(track_ids)) != len(track_ids) or any(t not in self.catalog for t in track_ids):
                 raise ValueError("trackIds must contain unique songs from the current library")
             if any(self.state["trackStatuses"].get(t) != "ready" for t in track_ids):
-                raise ValueError("Finish All-In-One + DSP for the selected songs first")
+                raise ValueError("Finish local audio analysis for the selected songs first")
             if any(self.catalog[t].path.suffix.lower() not in {".mp3", ".wav"} for t in track_ids):
                 raise ValueError("Muse audio features currently support MP3 and WAV only")
             self.state.update(buildPhase="music_features", error=None)
@@ -1002,9 +1008,9 @@ class SetBuilderService:
                 return
             self.state["trackStatuses"][track_id] = "analyzing"
             run = {"jobId": f"analysis-{time.time_ns()}", "buildId": self.state.get("buildId"),
-                   "engine": self.analysis_engine, "runner": "local_cpu" if self.analysis_engine == "all_in_one_plus_dsp" else "custom",
+                   "engine": self.analysis_engine, "runner": "custom" if self.analysis_engine == "custom" else "local_cpu",
                    "status": "running", "startedAt": utc_now(), "finishedAt": None,
-                   "durationSeconds": None, "neuralNet": "unverified"}
+                   "durationSeconds": None, "neuralNet": "not_used" if self.analysis_engine == "essentia_dsp" else "unverified"}
             self.state.setdefault("analysisRuns", {})[track_id] = run
             started = time.monotonic()
             self._recompute_status()
@@ -1013,7 +1019,7 @@ class SetBuilderService:
             result = self.analyzer(self.catalog[track_id])
             with self.lock:
                 run.update(status="completed", finishedAt=utc_now(), durationSeconds=round(time.monotonic() - started, 3))
-                if isinstance(result, dict) and result.get("neuralNet") in {"cache", "computed"}:
+                if isinstance(result, dict) and result.get("neuralNet") in {"cache", "computed", "not_used"}:
                     run["neuralNet"] = result["neuralNet"]
                 original = self.catalog[track_id]
                 analysis_path = self.analysis_root / track_id / "track-analysis-v1.json"

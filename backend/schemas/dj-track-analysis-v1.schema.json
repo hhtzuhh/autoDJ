@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dj-track-analysis-v1.schema.json",
+  "title": "DJ track analysis v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "analysis_cache_key",
+    "audio_sha256",
+    "source_filename",
+    "duration_seconds",
+    "rhythm",
+    "structure",
+    "bars",
+    "candidates",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "dj-track-analysis-v1"},
+    "schema_uri": {"const": "schemas/dj-track-analysis-v1.schema.json"},
+    "analysis_cache_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "audio_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_filename": {"type": "string", "minLength": 1},
+    "duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "rhythm": {
+      "type": "object",
+      "required": [
+        "bpm",
+        "meter",
+        "beat_count",
+        "beats_seconds",
+        "beat_positions",
+        "downbeats_seconds",
+        "source",
+        "timing_review_status",
+        "normalization"
+      ],
+      "properties": {
+        "bpm": {"type": "number", "exclusiveMinimum": 0},
+        "meter": {"const": "4/4"},
+        "beat_count": {"type": "integer", "minimum": 2},
+        "beats_seconds": {"type": "array", "items": {"type": "number"}},
+        "beat_positions": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1, "maximum": 4}
+        },
+        "downbeats_seconds": {"type": "array", "items": {"type": "number"}},
+        "source": {"enum": ["automatic_all_in_one", "automatic_essentia_dsp"]},
+        "timing_review_status": {
+          "enum": ["unreviewed", "human_confirmed"]
+        },
+        "normalization": {"type": "object"}
+      }
+    },
+    "structure": {
+      "type": "object",
+      "required": ["segments", "labels_are_weak_metadata", "labels_used_in_candidate_score"],
+      "properties": {
+        "segments": {"type": "array"},
+        "labels_are_weak_metadata": {"const": true},
+        "labels_used_in_candidate_score": {"const": false}
+      }
+    },
+    "bars": {"type": "array", "minItems": 1},
+    "candidates": {
+      "type": "object",
+      "required": ["entry", "exit"],
+      "properties": {
+        "entry": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "exit": {"type": "array", "items": {"$ref": "#/$defs/candidate"}}
+      }
+    },
+    "provenance": {"type": "object"}
+  },
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "required": [
+        "beat_index",
+        "time_seconds",
+        "role",
+        "score",
+        "selection_source",
+        "boundary_direction",
+        "pre_cue_energy_state",
+        "post_cue_energy_state"
+      ],
+      "properties": {
+        "beat_index": {"type": "integer", "minimum": 0},
+        "time_seconds": {"type": "number", "minimum": 0},
+        "role": {"enum": ["entry", "exit"]},
+        "selection_source": {"type": "string"},
+        "boundary_direction": {"enum": ["rising", "falling", "stable"]},
+        "pre_cue_energy_state": {"enum": ["low", "medium", "high"]},
+        "post_cue_energy_state": {"enum": ["low", "medium", "high"]},
+        "section_boundary": {"type": ["object", "null"]},
+        "human_review": {"type": "object"}
+      }
+    }
+  }
+}

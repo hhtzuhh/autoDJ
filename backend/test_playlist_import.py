@@ -1,6 +1,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from analysis_config import analysis_root
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
@@ -60,7 +61,7 @@ class PlaylistImportTest(unittest.TestCase):
     def test_pending_analysis_is_visible_and_not_implicitly_scheduled(self):
         with TemporaryDirectory() as raw:
             root = Path(raw); service, ids, no_call = self.service(root)
-            (root/'artifacts/time-map'/ids[1]/'track-analysis-v1.json').unlink()
+            (analysis_root(root)/ids[1]/'track-analysis-v1.json').unlink()
             content = '\n'.join(str(service.catalog[t].path) for t in ids[:2])
             report = service.import_playlist('pending.m3u8', content, preview=True)
             self.assertTrue(report['canImport']); self.assertEqual(report['missingAnalysis'], 1)

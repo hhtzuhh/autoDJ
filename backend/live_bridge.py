@@ -27,6 +27,7 @@ from typing import Any
 BACKEND_ROOT = Path(__file__).resolve().parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
+from analysis_config import analysis_root, selected_backend
 from transition_pipeline import (  # noqa: E402
     AnalysisCatalog,
     PairAnalysisCache,
@@ -141,8 +142,12 @@ class LiveStateStore(CrowdAdaptiveMixin):
             self.data_root / "artifacts/live-performance/tonight-set-list-v1.json"
         )
         self.analysis_catalog = AnalysisCatalog.from_root(
-            self.data_root / "artifacts/time-map"
+            analysis_root(self.data_root)
         )
+        backend_changed = self.queue.get("analysis_backend", "all_in_one") != selected_backend()
+        if backend_changed:
+            self.queue = {**self.queue, "revision": int(self.queue["revision"]) + 1,
+                          "ordered_track_ids": [], "analysis_backend": selected_backend()}
         queue_snapshot = QueueSnapshot(
             revision=int(self.queue["revision"]),
             ordered_track_ids=tuple(self.queue["ordered_track_ids"]),
@@ -159,14 +164,14 @@ class LiveStateStore(CrowdAdaptiveMixin):
             queue_snapshot.ordered_track_ids
         )
         self._seed_standby_overrides()
-        self.selection = self._load_selection()
-        self.envelope = self._load_envelope()
+        self.selection = {} if backend_changed else self._load_selection()
+        self.envelope = None if backend_changed else self._load_envelope()
         self._invalidate_restored_envelope()
-        if not self.envelope or self.envelope.get("status") not in {
+        if not backend_changed and (not self.envelope or self.envelope.get("status") not in {
             "completed",
             "invalidated",
             "cancelled",
-        }:
+        }):
             self._restore_following_override()
             self._restore_transition_buffer_overrides()
         self.catalog = self._load_catalog()
@@ -218,7 +223,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
         return None
 
     def _load_catalog(self) -> dict[str, dict[str, Any]]:
-        root = self.data_root / "artifacts/time-map"
+        root = analysis_root(self.data_root)
         catalog: dict[str, dict[str, Any]] = {}
         for path in sorted(root.glob("*/track-analysis-v1.json")):
             payload = load_json(path)
@@ -536,7 +541,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
             self.data_root / "artifacts/live-performance/tonight-set-list-v1.json"
         )
         self.analysis_catalog = AnalysisCatalog.from_root(
-            self.data_root / "artifacts/time-map"
+            analysis_root(self.data_root)
         )
         snapshot = QueueSnapshot(
             revision=int(queue["revision"]),
@@ -3564,6 +3569,7 @@ def main() -> int:
     os.environ["DJ_DATA_ROOT"] = str(data_root)
     os.environ["DJ_RUNTIME_DIR"] = str(data_root / "artifacts/mixxx-runtime")
     load_dotenv(data_root / ".env")
+    os.environ["DJ_ANALYSIS_ROOT"] = str(analysis_root(data_root))
     mixxx_root = workspace / "experiments/mixxx-control"
     sys.path.insert(0, str(mixxx_root))
     from observer import run_observer
@@ -3586,7 +3592,7 @@ def main() -> int:
     try:
         run_observer(
             port_name=port_name(),
-            analysis_root=data_root / "artifacts/time-map",
+            analysis_root=analysis_root(data_root),
             refresh_catalog=True,
             command_log=COMMAND_LOG,
             duration=args.duration,

@@ -1,4 +1,5 @@
 from pathlib import Path
+from analysis_config import analysis_root
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -42,7 +43,7 @@ class LocalDataTest(unittest.TestCase):
             service=SetBuilderService(outer,data_root=product,metadata_reader=metadata,start_worker=False)
             self.assertEqual(len(service.catalog),2)
             self.assertTrue(all(t.analysis_status=='pending' for t in service.catalog.values()))
-            self.assertEqual(service.analysis_root,(product/'artifacts/time-map').resolve())
+            self.assertEqual(service.analysis_root,analysis_root(product).resolve())
 
     def test_fresh_archives_outputs_and_preserves_songs_and_folder_docs(self):
         with TemporaryDirectory() as raw, patch('local_data.socket.create_connection', side_effect=ConnectionRefusedError):

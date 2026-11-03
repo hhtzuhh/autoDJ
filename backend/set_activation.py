@@ -11,6 +11,7 @@ import shutil
 from typing import Any
 
 from setlist_service import resolve_set_list, write_mixxx_playlist
+from analysis_config import analysis_root, selected_backend
 from transition_pipeline import AnalysisCatalog, utc_now
 
 
@@ -57,11 +58,12 @@ def prepare_activation(
     runtime = workspace / "artifacts/live-performance"
     queue = {
         "schema_version": 1,
+        "analysis_backend": selected_backend(),
         "revision": max(active_queue_revision + 1, int(builder_state["queueRevision"])),
         "ordered_track_ids": list(ordered),
         "updated_at": utc_now(),
     }
-    catalog = AnalysisCatalog.from_root(workspace / "artifacts/time-map")
+    catalog = AnalysisCatalog.from_root(analysis_root(workspace))
     manifest = resolve_set_list(catalog, queue, [workspace / "local-assets/samples"])
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     short_hash = hashlib.sha256(json.dumps(queue, sort_keys=True).encode("utf-8")).hexdigest()[:5]

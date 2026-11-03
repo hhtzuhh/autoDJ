@@ -15,6 +15,19 @@ function fixture() {
       transitions: [{status:'analyzed', candidateCount:5, reason:null}], curatorCalls: []}};
 }
 const find = (flow, lane, id) => flow[lane].find(n => n.id === id);
+test('DSP analysis and its cache never claim neural inference or confirmed downbeats', () => {
+  const rows = analysisTrackRows([
+    {id:'new', analysisStatus:'ready', analysisOrigin:'computed',
+     analysisRun:{engine:'essentia_dsp', status:'completed', neuralNet:'not_used'}},
+    {id:'cached', analysisStatus:'ready', analysisOrigin:'cache',
+     analysisSummary:{analysisBackend:'essentia_dsp'}},
+  ]);
+  assert.deepEqual(rows.map(r=>r.route), ['pipeline', 'metadata']);
+  assert.ok(rows.every(r=>r.source === 'Essentia + local DSP'));
+  assert.match(rows[0].note, /No neural model used/);
+  assert.match(rows[1].note, /Cached DSP analysis/);
+  assert.ok(rows.every(r=>r.note.includes('downbeats estimated')));
+});
 test('library analysis precedes selection with explicit preparation and start nodes', () => {
   const s=fixture();s.setBuilder.selectionOnly=true;s.setBuilder.buildPhase='library_analysis';
   s.setBuilder.library=s.setBuilder.queue;s.setBuilder.queue=[];

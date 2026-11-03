@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from analysis_config import analysis_root
 from tempfile import TemporaryDirectory
 import time
 import unittest
@@ -30,7 +31,7 @@ def write_analyzed_library(
     root: Path, count: int = 5, bpms: tuple[float, ...] | None = None
 ) -> tuple[str, ...]:
     library = root / "local-assets/samples"
-    analysis_root = root / "artifacts/time-map"
+    fixture_analysis_root = analysis_root(root)
     library.mkdir(parents=True)
     track_ids = []
     for index in range(count):
@@ -39,7 +40,7 @@ def write_analyzed_library(
         track_id = sha256_file(source)
         track_ids.append(track_id)
         write_music_result(root, track_id)
-        output = analysis_root / track_id / "track-analysis-v1.json"
+        output = fixture_analysis_root / track_id / "track-analysis-v1.json"
         output.parent.mkdir(parents=True)
         output.write_text(
             json.dumps(
@@ -201,7 +202,7 @@ class SetBuilderTest(unittest.TestCase):
                         "entry": [{"rank": 1, "beat_index": 8, "time_seconds": 2 * bar_seconds, "score": 0.75, "boundary_change": 0.4}],
                     },
                 }
-                output = root / "artifacts/time-map" / track.id / "track-analysis-v1.json"
+                output = analysis_root(root) / track.id / "track-analysis-v1.json"
                 output.parent.mkdir(parents=True, exist_ok=True)
                 output.write_text(json.dumps(payload), encoding="utf-8")
                 write_music_result(root, track.id)

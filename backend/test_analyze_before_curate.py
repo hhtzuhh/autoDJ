@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from analysis_config import analysis_root
 from tempfile import TemporaryDirectory
 import time
 import unittest
@@ -16,7 +17,7 @@ class AnalyzeBeforeCurateTest(unittest.TestCase):
             write_music_result(root,sha256_file(song))
 
     def analyze(self, root, track):
-        output=root/'artifacts/time-map'/track.id/'track-analysis-v1.json'
+        output=analysis_root(root)/track.id/'track-analysis-v1.json'
         output.parent.mkdir(parents=True,exist_ok=True)
         output.write_text(json.dumps({'audio_sha256':track.id,'analysis_cache_key':f'test-{track.id}',
             'source_filename':track.path.name,'duration_seconds':180,'rhythm':{'bpm':128},
@@ -97,7 +98,7 @@ class AnalyzeBeforeCurateTest(unittest.TestCase):
         with TemporaryDirectory() as raw:
             root=Path(raw);self.library(root,count=2)
             song=next((root/'local-assets/samples').iterdir());ident=sha256_file(song)
-            path=root/'artifacts/time-map'/ident/'track-analysis-v1.json';path.parent.mkdir(parents=True);path.write_text('{broken')
+            path=analysis_root(root)/ident/'track-analysis-v1.json';path.parent.mkdir(parents=True);path.write_text('{broken')
             service=SetBuilderService(root,metadata_reader=metadata,start_worker=False)
             state=service.build('two',2)
             self.assertEqual(state['buildPhase'],'library_analysis')

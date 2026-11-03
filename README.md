@@ -11,6 +11,49 @@ separately validated local prototype.
 
 ## Current status
 
+### Swappable local audio analysis
+
+The default analyzer is now `essentia_dsp` (no trained model). Set
+`DJ_ANALYSIS_BACKEND=all_in_one` to use the retained All-In-One adapter.
+Stop playback and restart the bridge after changing this setting; rebuild
+transition preparation and the performance plan. Both adapters produce the same
+`dj-track-analysis-v1` fields, checked against timing invariants. The product
+schema allows both rhythm sources in `backend/schemas/`.
+
+DSP caches live in `artifacts/time-map/essentia-dsp-v1/<audio-hash>/`.
+Existing All-In-One caches stay in `artifacts/time-map/<audio-hash>/` and are
+never used as DSP results. Switching backends invalidates restored preparation
+and live plans while preserving the chosen song order and original files.
+Adjacent pair caches remain bound to the exact analysis keys.
+
+The DSP adapter uses Essentia multifeature beats and the existing acoustic-accent
+4/4 phase estimate, followed by shared RMS, low-frequency, spectral-flux and cue
+scoring adapted from the workspace experiment. **Downbeats are estimates, not
+confirmed annotations**; the old phase heuristic matched only one of two
+reviewed songs. Beat timing and half/double tempo need listening review.
+Semantic sections are empty (unknown), and phrase boundaries are unconfirmed.
+This change does not establish audible transition quality. Muse audio
+descriptions and Meta performance planning remain separate nodes.
+
+DSP needs `ffmpeg` / `ffprobe` on PATH and Python 3.11 with
+`pip install -r requirements-analysis.txt`. Set `DJ_ANALYSIS_PYTHON` to that
+Python executable. During workspace development the existing time-map virtual
+environment is used automatically if present. The DSP implementation itself
+does not import experiment code. The optional All-In-One adapter still requires
+the original `experiments/time-map` and `experiments/allin1-local` environments.
+
+Standalone analysis from the product directory:
+
+```sh
+../experiments/time-map/.venv/bin/python backend/track_analyzer.py local-assets/samples/example.mp3 --backend essentia_dsp
+# Optional original implementation:
+../experiments/time-map/.venv/bin/python backend/track_analyzer.py local-assets/samples/example.mp3 --backend all_in_one
+```
+
+Essentia is an AGPL dependency; retain its notices and comply with its license
+when distributing an integrated application. See [Essentia licensing](https://essentia.upf.edu/licensing_information.html).
+No model weights or private songs are distributed with this repository.
+
 On `feat/analyze-library-before-curation`, Build ends at
 **analyzed library → Meta song selection and order**. Build first rescans
 `local-assets/samples/` and analyzes every missing library track, including songs

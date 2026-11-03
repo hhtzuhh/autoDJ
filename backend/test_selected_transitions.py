@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from analysis_config import analysis_root
 from copy import deepcopy
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -73,7 +74,7 @@ class SelectedTransitionsTest(unittest.TestCase):
             service.queued_jobs.add(('synthetic',))
             with self.assertRaises(ValueError):service.prepare_selected_transitions()
             service.queued_jobs.clear()
-            (root/'artifacts/time-map'/ids[0]/'track-analysis-v1.json').write_text('{}')
+            (analysis_root(root)/ids[0]/'track-analysis-v1.json').write_text('{}')
             with self.assertRaises(ValueError):service.prepare_selected_transitions()
             self.assertFalse(service.snapshot()['activationReady'])
 
@@ -84,7 +85,7 @@ class SelectedTransitionsTest(unittest.TestCase):
         store=object.__new__(LiveStateStore);store.workspace=root;store._data_root=root
         store.lock=threading.Lock();store.action_lock=threading.RLock();store.activation_in_progress=False
         store.set_builder=service;store._executor_running=Mock(return_value=False)
-        keys=[json.loads((root/'artifacts/time-map'/ident/'track-analysis-v1.json').read_text())['analysis_cache_key'] for ident in ids]
+        keys=[json.loads((analysis_root(root)/ident/'track-analysis-v1.json').read_text())['analysis_cache_key'] for ident in ids]
         store.raw_performance=SimpleNamespace(revision=1,decks={n:SimpleNamespace(play=False,track_id=ids[n-1],analysis_cache_key=keys[n-1],beat_index=0) for n in (1,2)})
         store.prepared_performance=None;store.performance_plan_state={'status':'idle'}
         store._sampler_slot_registry=Mock(return_value={ident:i+1 for i,ident in enumerate(ids)})

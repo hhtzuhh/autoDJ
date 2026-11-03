@@ -66,7 +66,7 @@ export function AgentFlow({state, webcam, disconnected, active, disabled, onBuil
       <span className="flow-legend__hint">Select a node to inspect its evidence</span>
     </div>
     <section className="flow-section" aria-labelledby="preparation-flow-title">
-      <div className="flow-section__heading"><div><span className="flow-section__index">01</span><h2 id="preparation-flow-title">Analyze first, then select</h2></div><span>Library → All-In-One + DSP → Muse Spark → Select & order</span></div>
+      <div className="flow-section__heading"><div><span className="flow-section__index">01</span><h2 id="preparation-flow-title">Analyze first, then select</h2></div><span>Library → Local audio analysis → Muse Spark → Select & order</span></div>
       <Lane nodes={preparation} selected={selected} setSelected={selectNode} name="prepare" />
       <p className="flow-section__note">Build completes local analysis, then Muse Spark music descriptions for the entire library before selecting songs. Existing results are reused; either stage can also run separately. After selection, prepare adjacent transition candidates, export the playlist, build and review the first performance window, then start playback explicitly.</p>
 

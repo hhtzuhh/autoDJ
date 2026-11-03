@@ -69,16 +69,16 @@ class FlowTelemetryTest(unittest.TestCase):
             self.assertEqual(failed['analysisRun']['status'],'failed')
             self.assertNotEqual(failed['analysisRun']['jobId'],track['analysisRun']['jobId'])
 
-    def test_default_analyzer_reports_internal_neural_cache_separately(self):
-        with TemporaryDirectory() as raw:
+    def test_all_in_one_analyzer_reports_internal_neural_cache_separately(self):
+        with TemporaryDirectory() as raw, patch.dict('os.environ', {'DJ_ANALYSIS_BACKEND': 'all_in_one'}):
             root=Path(raw); ids=write_analyzed_library(root,count=2)
             service=SetBuilderService(root,metadata_reader=metadata,start_worker=False)
             track=service.catalog[ids[0]]
-            with patch('set_builder.subprocess.run'):
+            with patch('track_analyzer.subprocess.run'):
                 self.assertEqual(service._run_analyzer(track)['neuralNet'],'computed')
                 cached=service.analysis_root/track.id/'allin1-raw/source.json'
                 cached.parent.mkdir(); cached.write_text('{}')
                 self.assertEqual(service._run_analyzer(track)['neuralNet'],'cache')
-            with patch('set_builder.subprocess.run',side_effect=RuntimeError('failed')):
+            with patch('track_analyzer.subprocess.run',side_effect=RuntimeError('failed')):
                 with self.assertRaises(RuntimeError):
                     service._run_analyzer(track)

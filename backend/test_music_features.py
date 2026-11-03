@@ -1,6 +1,7 @@
 import base64
 import json
 from pathlib import Path
+from analysis_config import analysis_root
 from tempfile import TemporaryDirectory
 import threading
 import time
@@ -25,7 +26,7 @@ def prepare(root, count=3, ready=True, transport=None, curator=None, start_worke
     service=SetBuilderService(root,metadata_reader=metadata,start_worker=False)
     if ready:
         for track in service.catalog.values():
-            dest=root/'artifacts/time-map'/track.id/'track-analysis-v1.json'
+            dest=analysis_root(root)/track.id/'track-analysis-v1.json'
             dest.parent.mkdir(parents=True)
             dest.write_text(json.dumps({'audio_sha256':track.id,'analysis_cache_key':'synthetic',
                 'rhythm':{'bpm':128},'bars':[],'structure':{'segments':[]}}))
@@ -153,7 +154,7 @@ class MusicFeaturesTest(unittest.TestCase):
                 return tuple(t.id for t in tracks[:count]),'Synthetic'
             service=prepare(root,ready=False,transport=transport,curator=curator)
             def analyze(track):
-                dest=root/'artifacts/time-map'/track.id/'track-analysis-v1.json'
+                dest=analysis_root(root)/track.id/'track-analysis-v1.json'
                 dest.parent.mkdir(parents=True)
                 dest.write_text(json.dumps({'audio_sha256':track.id,'analysis_cache_key':'synthetic',
                     'rhythm':{'bpm':128},'bars':[],'structure':{'segments':[]}}))
