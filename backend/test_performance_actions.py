@@ -186,7 +186,7 @@ class PerformanceActionsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"does not match"):
                 transition.resolve_plan(root/"plan.json",root)
 
-    def execute_fake(self, root, *, source=1, takeover_at=None, cancel_at=None, missing_mapping=False, in_track=None):
+    def execute_fake(self, root, *, source=1, takeover_at=None, cancel_at=None, missing_mapping=False, in_track=None, seeks=(), expect_interrupted=False):
         plan,resolved=self.build_plan(root,source,in_track)
         target=3-source
         clock=[0.0];last=[0.0];calls=[]
@@ -203,7 +203,14 @@ class PerformanceActionsTest(unittest.TestCase):
             if control=="play":state[int(deck)]["play"]=bool(value)
         def seek(deck,seconds,*args):
             advance();state[deck]["pos"]=seconds;state[deck]["play"]=False
-        def position(deck,*args):advance();return state[deck]["pos"]
+        pending_seeks=list(seeks)
+        def position(deck,*args):
+            advance()
+            if deck == source and pending_seeks and clock[0] >= pending_seeks[0][0]:
+                _, beat = pending_seeks.pop(0)
+                state[deck]["pos"] = beat * 60 / state[deck]["bpm"]
+                calls.append(("human_seek", deck, beat, clock[0]))
+            return state[deck]["pos"]
         def wait(deadline,**kwargs):
             clock[0]=max(clock[0],deadline)
             if takeover_at and clock[0]>=takeover_at:
@@ -222,8 +229,46 @@ class PerformanceActionsTest(unittest.TestCase):
              patch.object(transition,"CANCEL_FILE",root/"cancel"):
             try: routine_executor.execute(resolved,root,False)
             except RuntimeError:
-                if not (takeover_at or cancel_at or missing_mapping):raise
+                if not (takeover_at or cancel_at or missing_mapping or expect_interrupted):raise
         return state,calls
+
+    def test_pre_action_forward_and_backward_seeks_keep_routine_on_both_decks(self):
+        for source in (1, 2):
+            with self.subTest(source=source), TemporaryDirectory() as raw:
+                root=Path(raw)
+                # The first source action is beat 96; neither seek crosses it.
+                state,calls=self.execute_fake(root,source=source,seeks=[(.5,94),(1.,80)])
+                self.assertFalse(state[source]['play'])
+                self.assertTrue(state[3-source]['play'])
+                events=[json.loads(line) for line in next(root.glob('runs/*/transition-events.jsonl')).read_text().splitlines()]
+                self.assertEqual(sum(e['event']=='routine_safe_seek' for e in events),2)
+                self.assertTrue(any(e['event']=='routine_completed' for e in events))
+                self.assertFalse(any(e['event']=='run_taken_over' for e in events))
+
+    def test_seeks_at_or_past_first_action_still_take_over(self):
+        # Crossfade is beat 160, but the tempo ramp already starts at 96.
+        for destination in (96,100,160):
+            with self.subTest(destination=destination), TemporaryDirectory() as raw:
+                root=Path(raw)
+                state,calls=self.execute_fake(root,seeks=[(.5,destination)],expect_interrupted=True)
+                self.assertEqual(calls[-1][0],'human_seek')
+                self.assertTrue(state[1]['play'])
+                self.assertFalse(state[2]['play'])
+                log=next(root.glob('runs/*/transition-events.jsonl')).read_text()
+                self.assertIn('run_taken_over',log)
+                self.assertNotIn('routine_handoff_started',log)
+
+    def test_backward_seek_after_action_started_does_not_reenter_safe_wait(self):
+        for in_track in (None,[{'function':'bass_pulse','track_id':'a'*64,'start_beat':48,'duration_beats':16,'depth':.25}]):
+            with self.subTest(in_track=in_track), TemporaryDirectory() as raw:
+                root=Path(raw)
+                state,calls=self.execute_fake(root,in_track=in_track,seeks=[(6.,20)],expect_interrupted=True)
+                self.assertEqual(calls[-1][0],'human_seek')
+                self.assertTrue(state[1]['play'])
+                self.assertFalse(state[2]['play'])
+                log=next(root.glob('runs/*/transition-events.jsonl')).read_text()
+                self.assertIn('run_taken_over',log)
+                self.assertNotIn('routine_safe_seek',log)
 
     def test_actual_position_drives_ramps_handoff_and_native_recovery_both_decks(self):
         for source in (1,2):
