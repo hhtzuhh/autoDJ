@@ -11,6 +11,7 @@ vite.config.js
 vite.config.d.ts
 .DS_Store
 .local/
+/README-archive.md
 
 # Private inputs and generated runs: retain only folder documentation.
 /local-assets/*
@@ -18,9 +19,7 @@ vite.config.d.ts
 !/local-assets/samples/
 /local-assets/samples/*
 !/local-assets/samples/README.md
-!/local-assets/samples-v2/
-/local-assets/samples-v2/*
-!/local-assets/samples-v2/README.md
+/local-assets/samples-v2/
 !/local-assets/samples-v3/
 /local-assets/samples-v3/*
 !/local-assets/samples-v3/README.md
