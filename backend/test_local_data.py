@@ -12,6 +12,27 @@ from test_set_builder import metadata, write_analyzed_library
 
 
 class LocalDataTest(unittest.TestCase):
+    def test_v3_library_excludes_legacy_songs_and_legacy_selection(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            initialize(root)
+            legacy = root / 'local-assets/samples'
+            legacy.mkdir()
+            (legacy / 'old.wav').write_bytes(b'old song')
+            previous = root / 'local-assets/samples-v2'
+            previous.mkdir()
+            (previous / 'v2.wav').write_bytes(b'previous library song')
+            (root / 'local-assets/samples-v3/new.wav').write_bytes(b'new song')
+            old = SetBuilderService(root, library_root=legacy,
+                                    metadata_reader=metadata, start_worker=False)
+            old.state['orderedTrackIds'] = list(old.catalog)
+            old._persist()
+            current = SetBuilderService(root, metadata_reader=metadata, start_worker=False)
+            self.assertEqual([t.path.name for t in current.catalog.values()], ['new.wav'])
+            self.assertEqual(current.state['orderedTrackIds'], [])
+            self.assertEqual(current.queued_jobs, set())
+            self.assertTrue((legacy / 'old.wav').is_file())
+
     def test_empty_product_does_not_restore_outer_workspace_state(self):
         with TemporaryDirectory() as raw:
             outer = Path(raw)
@@ -38,8 +59,8 @@ class LocalDataTest(unittest.TestCase):
         with TemporaryDirectory() as raw:
             outer=Path(raw); write_analyzed_library(outer,count=2)
             product=outer/'submission'; initialize(product)
-            for song in (outer/'local-assets/samples').iterdir():
-                (product/'local-assets/samples'/song.name).write_bytes(song.read_bytes())
+            for song in (outer/'local-assets/samples-v3').iterdir():
+                (product/'local-assets/samples-v3'/song.name).write_bytes(song.read_bytes())
             service=SetBuilderService(outer,data_root=product,metadata_reader=metadata,start_worker=False)
             self.assertEqual(len(service.catalog),2)
             self.assertTrue(all(t.analysis_status=='pending' for t in service.catalog.values()))
@@ -48,7 +69,7 @@ class LocalDataTest(unittest.TestCase):
     def test_fresh_archives_outputs_and_preserves_songs_and_folder_docs(self):
         with TemporaryDirectory() as raw, patch('local_data.socket.create_connection', side_effect=ConnectionRefusedError):
             root=Path(raw); initialize(root)
-            song=root/'local-assets/samples/song.wav'; song.write_bytes(b'private fixture')
+            song=root/'local-assets/samples-v3/song.wav'; song.write_bytes(b'private fixture')
             readme=root/'artifacts/README.md'; readme.write_text('instructions')
             cache=root/'artifacts/time-map'; cache.mkdir(); (cache/'example.json').write_text('{}')
             archive=fresh_outputs(root)

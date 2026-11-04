@@ -69,3 +69,22 @@ class PlanningHistoryTest(unittest.TestCase):
         rows = self.history.attempts(events)
         self.assertEqual({r['setRunId'] for r in rows}, {'set-000001', 'set-000002'})
         self.assertTrue(all(r['responseReceived'] for r in rows))
+
+    def test_only_later_accepted_background_plan_marks_timeout_recovery(self):
+        timeout = self.event('planning_failed', 'timeout', at=1)
+        timeout['data']['scope'] = 'future_buffer'
+        success = self.event('planning_attempt', 'succeeded', request='meta-2', at=3)
+        success['data'].update(scope='future_buffer', startedAt=2)
+        decision = self.event('decision', 'selected_not_executed', request='meta-2', at=4)
+        row = self.history.attempts([timeout, success, decision])[0]
+        self.assertEqual(row['status'], 'timeout')
+        self.assertEqual(row['recoveredBy'], 'meta-2')
+        self.assertFalse(row['responseReceived'])
+        self.assertNotIn('recoveredBy', self.history.attempts([timeout, success])[-1])
+        for field, value in (('setRunId', 'another-set'), ('sessionId', 'another-bridge')):
+            other = {**success, field: value}
+            other_decision = {**decision, field: value}
+            row = next(r for r in self.history.attempts([timeout, other, other_decision]) if r['id'] == 'meta-1')
+            self.assertNotIn('recoveredBy', row)
+        success['data']['scope'] = 'crowd_adaptive'
+        self.assertNotIn('recoveredBy', self.history.attempts([timeout, success, decision])[0])

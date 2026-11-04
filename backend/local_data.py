@@ -10,7 +10,7 @@ PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def initialize(root: Path) -> None:
-    (root / "local-assets/samples").mkdir(parents=True, exist_ok=True)
+    (root / "local-assets/samples-v3").mkdir(parents=True, exist_ok=True)
     (root / "artifacts").mkdir(parents=True, exist_ok=True)
 
 
@@ -41,7 +41,7 @@ def main() -> None:
     if args.fresh:
         archive = fresh_outputs(PRODUCT_ROOT)
         print(f"Previous outputs archived in {archive}" if archive else "Outputs already empty.")
-    print(f"Songs: {PRODUCT_ROOT / 'local-assets/samples'}")
+    print(f"Songs: {PRODUCT_ROOT / 'local-assets/samples-v3'}")
     print(f"Outputs: {PRODUCT_ROOT / 'artifacts'}")
 
 

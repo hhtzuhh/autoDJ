@@ -91,7 +91,9 @@ class CrowdAdaptiveMixin:
         self.crowd_last_capture = self.crowd_last_apply = self.crowd_retry_at = 0
         self.crowd_reorder_held = False
         self.crowd_gesture_held = None
-        self.crowd.update(decision=None, lastApplied=None, observation=None,
+        if not self.crowd.get('observing'):
+            self.crowd['enabled'] = False
+        self.crowd.update(decision=None, lastApplied=None, observation=None, request=None,
             status='observing' if self.crowd['enabled'] else 'off', reason='New set started; waiting for fresh observations.')
         self.selection['set_run_id'] = run['id']
         if self.selection.get('meta_origin'):
@@ -124,7 +126,7 @@ class CrowdAdaptiveMixin:
 
     def _crowd_init(self):
         if not hasattr(self, 'crowd'):
-            self.crowd = dict(enabled=False, status='off', reason='Webcam adaptation is off.', session=None,
+            self.crowd = dict(enabled=False, observing=False, status='off', reason='Webcam adaptation is off.', session=None,
                               decision=None, lastApplied=None)
             self.crowd_lease = 0.0
             self.crowd_generation = 0
@@ -146,7 +148,17 @@ class CrowdAdaptiveMixin:
         self.crowd_pending = None
         self.crowd_requested = None
         self.crowd_previous = None
-        self.crowd.update(enabled=False, status='off', reason=reason)
+        self.crowd.update(enabled=False, observing=False, status='off', reason=reason)
+
+    def _crowd_stop_observing(self, reason):
+        """Stop accepting camera input without revoking an accepted operator request."""
+        self._crowd_init()
+        working = bool(self.crowd_requested or self.crowd_busy or self.crowd_pending)
+        self.crowd.update(observing=False, enabled=working, observationReason=reason)
+        if not working:
+            self.crowd.update(status='off', reason=reason)
+        self._memory().record('observation_stopped', {'setRunId': self._run_id(),
+            'reason': reason, 'acceptedRequestRetained': working})
 
     def _crowd_discard_pending(self, reason):
         """Every staged proposal gets a terminal audit before it is cleared."""
@@ -167,10 +179,13 @@ class CrowdAdaptiveMixin:
 
     def _crowd_valid(self):
         self._crowd_init()
-        if self.crowd['enabled'] and (time.monotonic() > self.crowd_lease
-                or not getattr(self, 'auto_arm_enabled', False)
+        if self.crowd['enabled'] and (not getattr(self, 'auto_arm_enabled', False)
                 or (getattr(self, 'envelope', None) or {}).get('status') in ('invalidated', 'cancelled')):
-            self._crowd_stop('Camera heartbeat expired, Auto arm stopped, or human control invalidated the plan.')
+            self._crowd_stop('Auto arm stopped or human control invalidated the plan.')
+        elif self.crowd.get('observing') and time.monotonic() > self.crowd_lease:
+            self._crowd_stop_observing('Camera heartbeat expired; accepted requests remain valid until their original expiry.')
+        elif not self.crowd.get('observing') and not (self.crowd_requested or self.crowd_busy or self.crowd_pending):
+            self.crowd['enabled'] = False
         return self.crowd['enabled']
 
     def crowd_snapshot(self):
@@ -202,7 +217,14 @@ class CrowdAdaptiveMixin:
             if payload.get('enabled') is False:
                 if self.crowd['enabled'] and payload.get('session') != self.crowd['session']:
                     return 409, {'error': 'Only the owning webcam session can disable adaptation.'}
-                self._crowd_stop('Stopped by operator or camera.')
+                if payload.get('preserveAccepted') is True:
+                    causes = {'camera_stopped': 'Camera stopped.', 'page_hidden': 'Browser page hidden.',
+                        'page_closed': 'Browser page closed or view unmounted.',
+                        'camera_interrupted': 'Camera interrupted.', 'observation_error': 'Camera observation failed.',
+                        'new_gestures_stopped': 'New gestures stopped.', 'connection_lost': 'Live connection lost.'}
+                    self._crowd_stop_observing(causes.get(payload.get('reason'), 'New camera observations stopped.'))
+                else:
+                    self._crowd_stop('Adaptive requests explicitly cancelled.')
                 return 200, self._crowd_payload()
             if payload.get('enabled') is not True:
                 return 400, {'error': 'enabled_must_be_boolean'}
@@ -213,20 +235,24 @@ class CrowdAdaptiveMixin:
                 return 400, {'error': 'webcam_session_required'}
             if not getattr(self, 'auto_arm_enabled', False) or not getattr(self, 'continuous_set_active', False) or self._future_context() is None or self._recovery_reason():
                 return 409, {'error': 'Start a live continuous set with Auto arm before enabling crowd adaptation.'}
-            if self.crowd['enabled'] and payload.get('session') != self.crowd['session']:
+            if self.crowd.get('observing') and payload.get('session') != self.crowd['session']:
                 return 409, {'error': 'Another webcam session owns adaptation. Stop it or use human takeover first.'}
-            self._crowd_stop('Starting a fresh camera session.')
+            working = bool(self.crowd_requested or self.crowd_busy or self.crowd_pending)
+            if not working:
+                self._crowd_stop('Starting a fresh camera session.')
             self.crowd_seen.clear()
             self.crowd_reorder_held = False
             self.crowd_gesture_held = None
             self.crowd_last_capture = 0
-            self.crowd.update(enabled=True, session=session, status='observing', reason='Waiting for fresh webcam evidence.', decision=None)
+            self.crowd.update(enabled=True, observing=True, session=session, observationReason=None)
+            if not working:
+                self.crowd.update(status='observing', reason='Waiting for fresh webcam evidence.', decision=None, request=None)
             self.crowd_lease = time.monotonic() + LEASE_SECONDS
             return 200, self._crowd_payload()
 
     def request_crowd_heartbeat(self, payload):
         with self.action_lock:
-            if not self._crowd_valid() or payload.get('session') != self.crowd['session']:
+            if not self._crowd_valid() or not self.crowd.get('observing') or payload.get('session') != self.crowd['session']:
                 return 409, {'error': 'Adaptive session is off. Enable it again explicitly.'}
             self.crowd_lease = time.monotonic() + LEASE_SECONDS
             return 200, self._crowd_payload()
@@ -250,7 +276,7 @@ class CrowdAdaptiveMixin:
 
     def _crowd_ingest_current(self, job):
         with self.action_lock:
-            if not self._crowd_valid(): return 409, {'error': 'Crowd adaptation is off.'}
+            if not self._crowd_valid() or not self.crowd.get('observing'): return 409, {'error': 'New camera observations are off.'}
             run_id = self._run_id()
             if job.get('setRunId') != run_id:
                 return 200, {**self._crowd_payload(), 'ignoredObservation': 'Capture belongs to another set run; it remains in its original log.'}
@@ -297,6 +323,7 @@ class CrowdAdaptiveMixin:
                 return 200, self._crowd_payload()
             if self.crowd_pending and self.crowd_pending['evidence']['goal'] == goal and time.time() - timestamp(self.crowd_pending['evidence']['capturedAt']) < FRESH_SECONDS:
                 return 200, self._crowd_payload()
+            self.crowd['request'] = {k: deepcopy(evidence[k]) for k in ('jobId', 'setRunId', 'capturedAt', 'goal')}
             context = self._future_context()
             if context is None or self.supervisor is None:
                 self.crowd.update(status='hold', reason='Waiting for an owned current transition.')
@@ -311,7 +338,7 @@ class CrowdAdaptiveMixin:
             self.crowd_generation += 1
             self._crowd_discard_pending('A newer webcam request replaced this pending proposal.')
             self.crowd_requested = evidence
-            self.crowd.update(status='queued', reason='Number 1 accepted: requesting a different remaining order at the next safe handoff.' if force_reorder else 'Evidence saved. Waiting for the shared rolling planner.')
+            self.crowd.update(status='queued', reason='Number 1 accepted: preserving the current and next prepared handoff, then reordering later songs.' if force_reorder else 'Evidence saved. Waiting for the shared rolling planner.')
             self._schedule_future_transition_plan()
             return 202, self._crowd_payload()
 
@@ -329,6 +356,17 @@ class CrowdAdaptiveMixin:
             return False
         if time.monotonic() < self.crowd_retry_at:
             return False
+        if evidence['goal'] == 'reorder':
+            anchor = self._crowd_reorder_anchor()
+            if anchor is None:
+                self.crowd.update(status='queued', reason='Reorder queued: waiting for a prepared next handoff before changing later songs.')
+                return False  # Let the ordinary planner supply the protected handoff.
+            ids = self.queue['ordered_track_ids']
+            if len(ids) - ids.index(anchor['plan']['deck_b']['audio_sha256']) - 1 < 2:
+                self.crowd_requested = None
+                self.crowd.update(status='hold', reason='Cannot reorder: fewer than two songs remain after the protected next handoff.')
+                return False
+            evidence = {**evidence, 'reorderAnchor': anchor}
         self.crowd_requested = None
         self.crowd_busy = True
         self.crowd.update(status='planning', reason='Meta is handling an explicit gesture: reorder songs or adjust future in-track actions.', planningGoal=evidence['goal'])
@@ -336,13 +374,97 @@ class CrowdAdaptiveMixin:
                          name='idj-crowd-planner', daemon=True).start()
         return True
 
+    @staticmethod
+    def _crowd_plan_binding(plan):
+        # Arm changes execution IDs, but not musical timing or deck identities.
+        return {k: deepcopy(plan.get(k)) for k in ('deck_a', 'deck_b', 'mix',
+            'performance_actions', 'tempo_routine', 'in_track_actions', 'automation_start_beat_index')}
+
+    def _crowd_reorder_anchor(self):
+        context = self._future_context()
+        if context is None:
+            return None
+        active = self.selection['next_executable_plan']
+        future = self.future_transition_plan
+        if (isinstance(future, dict) and future.get('based_on_active_plan_id') == context[0]
+                and future.get('queue_revision') == context[1]
+                and future.get('based_on_planning_epoch', 0) == context[2]):
+            edges = future.get('transition_buffer', [])
+        else:
+            edges = self.selection.get('transition_buffer', [])[1:]
+        ids = self.queue['ordered_track_ids']
+        source = active['deck_b']['audio_sha256']
+        if not edges or source not in ids or ids.index(source) + 1 >= len(ids):
+            return None
+        edge = edges[0]
+        target = ids[ids.index(source) + 1]
+        if edge.get('source_track_id') != source or edge.get('target_track_id') != target:
+            return None
+        try:
+            plan = self._plan_from_buffer_edge(edge, source_id=source, target_id=target,
+                source_deck=int(active['deck_b']['deck']), target_deck=int(active['deck_a']['deck']),
+                model=str(self.selection.get('model') or 'Meta'), suffix='reorder-anchor')
+        except (KeyError, ValueError, TypeError):
+            return None  # An incomplete/legacy draft is not a protected executable handoff.
+        return dict(plan=plan, originalPlan=self._crowd_plan_binding(active),
+            queue=deepcopy(self.queue), previousEdges=deepcopy(edges[1:]))
+
+    def _crowd_anchor_phase(self, anchor):
+        """Allow one normal promotion, never changed cues, queue or a passed anchor."""
+        if self.queue != anchor['queue'] or self._future_context() is None:
+            return None
+        active = self._crowd_plan_binding(self.selection['next_executable_plan'])
+        if active == self._crowd_plan_binding(anchor['plan']):
+            return 'anchor'
+        if active == anchor['originalPlan']:
+            upcoming = self._crowd_reorder_anchor()
+            if upcoming and self._crowd_plan_binding(upcoming['plan']) == self._crowd_plan_binding(anchor['plan']):
+                return 'before'
+        return None
+
+    def _crowd_retry_reorder_after_handoff(self, generation, context, evidence, active, old_queue):
+        """Replan the original request, never apply a response for an old handoff.
+
+        Caller holds action_lock. Preserve capture time and generation so a
+        retry cannot extend evidence freshness or revive a cancelled gesture.
+        """
+        current = self._future_context()
+        if (evidence.get('goal') != 'reorder' or evidence.get('source') != 'gesture'
+                or not self._crowd_valid() or generation != self.crowd_generation
+                or not self.continuous_set_active or current is None or current == context
+                or evidence.get('setRunId') != self._run_id()
+                or not 0 <= time.time() - timestamp(evidence['capturedAt']) <= FRESH_SECONDS
+                or self.crowd_requested is not None or self.crowd_pending is not None
+                or self.queue['revision'] != old_queue['revision']
+                or self.queue['ordered_track_ids'] != old_queue['ordered_track_ids']):
+            return False
+        ids = self.queue['ordered_track_ids']
+        plan = self.selection['next_executable_plan']
+        previous_target = active['deck_b']['audio_sha256']
+        source, target = plan['deck_a']['audio_sha256'], plan['deck_b']['audio_sha256']
+        if (any(t not in ids for t in (previous_target, source, target))
+                or ids.index(source) < ids.index(previous_target)
+                or ids.index(target) != ids.index(source) + 1
+                or len(ids) - ids.index(target) - 1 < 2):
+            return False
+        self.crowd_requested = {k: deepcopy(v) for k, v in evidence.items() if k != 'reorderAnchor'}
+        self.crowd_retry_at = 0.0
+        reason = 'Playback advanced during reorder planning; retrying the same request against the new locked handoff.'
+        self.crowd.update(status='queued', reason=reason)
+        self._memory().record('feedback_status', {'setRunId': evidence.get('setRunId'),
+            'jobId': evidence['jobId'], 'status': 'queued', 'reason': reason})
+        return True
+
     def _crowd_plan_worker(self, generation, context, evidence):
         meta_call = None
         ids = []
         try:
             with self.action_lock:
-                if not self._crowd_valid() or generation != self.crowd_generation or context != self._future_context(): return
+                anchor = evidence.get('reorderAnchor')
+                context_valid = self._crowd_anchor_phase(anchor) is not None if anchor else context == self._future_context()
+                if not self._crowd_valid() or generation != self.crowd_generation or not context_valid: return
                 active = deepcopy(self.selection['next_executable_plan'])
+                original_active = deepcopy(active)
                 old_queue = deepcopy(self.queue)
                 ids = list(old_queue['ordered_track_ids'])
                 source = active['deck_b']['audio_sha256']
@@ -357,6 +479,13 @@ class CrowdAdaptiveMixin:
                     previous_edges = future.get('transition_buffer', [])
                 else:
                     previous_edges = self.selection.get('transition_buffer', [])[1:]
+                if anchor:
+                    if self._crowd_anchor_phase(anchor) is None:
+                        return
+                    active = deepcopy(anchor['plan'])
+                    source = active['deck_b']['audio_sha256']
+                    index = ids.index(source)
+                    previous_edges = anchor['previousEdges']
                 before_window = self._crowd_window_summary(previous_edges)
                 orders = ([order for order in bounded_orders(ids, index) if order != ids]
                           if evidence['goal'] == 'reorder' else [ids])
@@ -398,7 +527,7 @@ class CrowdAdaptiveMixin:
             load_dotenv(self.data_root / '.env')
             config = MetaConfig.from_environment()
             meta_call = self._begin_meta_call(config, tuple(ids[index:index+4]), 'crowd_adaptive')
-            context_data = {**evidence, **self._planning_memory_context(tuple(ids), for_gesture=True),
+            context_data = {**{k: v for k, v in evidence.items() if k != 'reorderAnchor'}, **self._planning_memory_context(tuple(ids), for_gesture=True),
                 'requested_change': 'in_track_actions',
                 'previous_window': before_window,
                 'policy': 'This request concerns optional IN-TRACK actions during future songs, not just the handoff. '
@@ -413,7 +542,7 @@ class CrowdAdaptiveMixin:
                 context_data['requested_change'] = 'queue_order'
                 context_data['policy'] = ('The operator explicitly held the number 1 gesture to request a different remaining song order. '
                     'Every supplied candidate changes the unlocked order. Choose the most musically suitable feasible option and explain the gesture request in English. '
-                    'This gesture does not imply build/ease, mood or enjoyment. Preserve the currently locked handoff. '
+                    'This gesture does not imply build/ease, mood or enjoyment. Preserve the locked prefix, including the protected next handoff. '
                     'Choose transition parameters and optional in-track actions only as supported; no extra action is required.')
             with self.meta_calls_lock:
                 next(call for call in self.meta_calls if call['id'] == meta_call)['memoryContext'] = context_data['memory']
@@ -435,8 +564,19 @@ class CrowdAdaptiveMixin:
             entries = {r['track_id']: r for r in manifest['ordered_tracks']}
             manifest = {**manifest, 'queue_revision': queue['revision'], 'ordered_tracks': [entries[t] for t in selected_order]}
             with self.action_lock:
-                if not self._crowd_valid() or generation != self.crowd_generation or context != self._future_context():
-                    self._finish_meta_call(completed_call, RuntimeError('active_plan_changed_during_future_meta_call'))
+                context_valid = self._crowd_anchor_phase(anchor) is not None if anchor else context == self._future_context()
+                issue = None
+                if not self._crowd_valid():
+                    issue = 'Adaptive request cancelled: ' + self.crowd['reason']
+                elif generation != self.crowd_generation:
+                    issue = 'A newer gesture, uncertain observation, or set run replaced this request.'
+                elif not 0 <= time.time() - timestamp(evidence['capturedAt']) <= FRESH_SECONDS:
+                    issue = 'The original gesture expired before its response could be applied.'
+                elif not context_valid:
+                    issue = 'The protected handoff changed or already passed.' if anchor else 'Playback advanced during planning.'
+                if issue:
+                    self._finish_meta_call(completed_call, RuntimeError('active_plan_changed_during_future_meta_call'), discard_reason=issue)
+                    self._crowd_retry_reorder_after_handoff(generation, context, evidence, original_active, old_queue)
                     return
                 compiled = self._compile_three_transition_candidate(tuple(selection.candidate['window_track_ids']), selection,
                     config.model, int(active['deck_b']['deck']), int(active['deck_a']['deck']))
@@ -447,7 +587,7 @@ class CrowdAdaptiveMixin:
                 compiled['next_executable_plan']['plan_id'] += '-crowd-' + evidence['jobId'][:8]
                 compiled['based_on_active_plan_id'], _, compiled['based_on_planning_epoch'] = context
                 self.crowd_pending = dict(context=context, generation=generation, evidence=evidence, queue=queue,
-                    manifest=manifest, pipeline=pipeline, edges=edges, compiled=compiled, old_queue=old_queue)
+                    manifest=manifest, pipeline=pipeline, edges=edges, compiled=compiled, old_queue=old_queue, anchor=anchor)
                 decision = dict(triggerGoal=evidence.get('goal'), triggerSource=evidence.get('source'), requestId=completed_call, setRunId=evidence.get('setRunId'), reason=selection.decision.reason, model=config.model,
                     requestedChange=context_data['requested_change'],
                     before=ids, after=selected_order, queueChanged=selected_order != ids, lockedThrough=index,
@@ -479,7 +619,7 @@ class CrowdAdaptiveMixin:
                     self.crowd.update(status='hold', reason='Meta kept the existing order and actions; no application needed.', decision=decision)
                     self._crowd_record('unchanged', {'decision': decision, 'evidence': evidence})
                     return
-                self.crowd.update(status='staged', reason='Waiting for the current transition to complete; no playback change yet.', decision=decision)
+                self.crowd.update(status='staged', reason=('Later-song reorder ready; waiting for the protected next handoff to complete.' if anchor else 'Waiting for the current transition to complete; no playback change yet.'), decision=decision)
                 self._crowd_record('staged', {'decision': decision, 'evidence': evidence, 'compiled': compiled})
         except Exception as error:
             self._finish_meta_call(meta_call, error)
@@ -526,11 +666,19 @@ class CrowdAdaptiveMixin:
         with self.action_lock:
             if not self._crowd_valid() or not self.crowd_pending: return target_id
             p = self.crowd_pending
-            if (p['generation'] != self.crowd_generation or p['context'] != self._future_context()
+            anchor = p.get('anchor')
+            phase = self._crowd_anchor_phase(anchor) if anchor else None
+            context_valid = phase is not None if anchor else p['context'] == self._future_context()
+            if (p['generation'] != self.crowd_generation or not context_valid
                     or time.time() - timestamp(p['evidence']['capturedAt']) > FRESH_SECONDS):
                 self._crowd_discard_pending('Staged evidence or playback context expired before the handoff.')
                 self.crowd.update(status='hold', reason='Staged evidence or playback context expired before the handoff.')
                 return target_id
+            if phase == 'before':
+                return target_id  # Preserve B→C; this proposal starts only after C enters.
+            if anchor:
+                p['context'] = self._future_context()
+                p['compiled']['based_on_active_plan_id'], _, p['compiled']['based_on_planning_epoch'] = p['context']
             perf = self.raw_performance
             plan = p['compiled']['next_executable_plan']
             source_deck = perf.decks[int(plan['deck_a']['deck'])]

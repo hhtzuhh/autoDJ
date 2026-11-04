@@ -1190,7 +1190,7 @@ class LiveStateStore(CrowdAdaptiveMixin):
                 "performanceActions": routine.get("actions", []),
                 "inTrackActions": routine.get("in_track_actions")}
 
-    def _finish_meta_call(self, request_id: str | None, error: Exception | None = None) -> None:
+    def _finish_meta_call(self, request_id: str | None, error: Exception | None = None, *, discard_reason: str | None = None) -> None:
         if request_id is None:
             return
         status = "succeeded"
@@ -1208,12 +1208,12 @@ class LiveStateStore(CrowdAdaptiveMixin):
                     self.meta_calls[index] = {
                         **call, "status": status, "finishedAt": time.time() * 1000,
                         "phase": "finished",
-                        "detail": f"{type(error).__name__}: {error}" if error else None,
+                        "detail": discard_reason or (f"{type(error).__name__}: {error}" if error else None),
                     }
                     break
         if completed is not None:
-            detail = f"{type(error).__name__}: {error}" if error else None
-            if status == 'discarded':
+            detail = discard_reason or (f"{type(error).__name__}: {error}" if error else None)
+            if status == 'discarded' and not discard_reason:
                 reason = (getattr(self, 'envelope', None) or {}).get('invalidation_reason')
                 if reason:
                     detail = f"Active plan invalidated ({reason}); returned response was not applied."

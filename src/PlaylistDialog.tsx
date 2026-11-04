@@ -77,7 +77,7 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
   return <dialog ref={dialog} className="playlist-dialog" aria-labelledby="playlist-dialog-title" onCancel={onClose} onClose={onClose}>
     <div className="playlist-dialog__header"><div><span className="eyebrow">Meta playlist assistant</span><h2 id="playlist-dialog-title">Your next set</h2></div>
       <button type="button" className="playlist-dialog__close" onClick={onClose} aria-label="Close playlist dialog">×</button></div>
-    <p className="playlist-dialog__library">{b?.catalogCount ?? 0} local tracks · <code>local-assets/samples/</code></p>
+    <p className="playlist-dialog__library">{b?.catalogCount ?? 0} local tracks · <code>local-assets/samples-v3/</code></p>
     <div className="playlist-dialog__modes" role="group" aria-label="Playlist source">
       <button type="button" aria-pressed={mode === "new"} onClick={() => setMode("new")}>Build a new playlist</button>
       <button type="button" aria-pressed={mode === "saved"} onClick={() => setMode("saved")}>Use a saved playlist</button>
@@ -102,11 +102,11 @@ export function PlaylistDialog({open, onClose, state, disabled, onBuild}: {
       <form className="playlist-composer" onSubmit={event => {event.preventDefault(); void submit();}}>
         <label htmlFor="playlist-prompt">Describe your playlist</label>
         <textarea id="playlist-prompt" value={prompt} disabled={locked} rows={3}
-          placeholder="幫我排 3 首 house，從輕鬆 groove 慢慢增加能量…"
+          placeholder="Build a 3-track house set, starting with a relaxed groove and gradually increasing the energy…"
           onChange={event => {setPrompt(event.target.value); const parsed = requestedTrackCount(event.target.value); if (parsed != null) setCount(parsed);}} />
         <div className="playlist-composer__actions"><label>Tracks<input type="number" min={2} max={Math.max(2, max)} value={count} disabled={locked} onChange={event => setCount(Number(event.target.value))} /></label>
           <button type="submit" className="button button--primary" disabled={locked || !validCount || !prompt.trim()}>{busy || preparing ? "Preparing…" : `Send · build ${count} tracks`}</button></div>
-        <small>{max < 2 ? "Add at least two songs to local-assets/samples/ and restart the bridge." : !validCount ? `Choose 2–${max} tracks.` : `Sending completes local analysis and Muse Spark descriptions for all ${b?.catalogCount ?? 0} library tracks before selecting ${count}. Model calls use API credits.`}</small>
+        <small>{max < 2 ? "Add at least two songs to local-assets/samples-v3/ and restart the bridge." : !validCount ? `Choose 2–${max} tracks.` : `Sending completes local analysis and Muse Spark descriptions for all ${b?.catalogCount ?? 0} library tracks before selecting ${count}. Model calls use API credits.`}</small>
       </form>
     </> : <div className="playlist-saved">
       <div className="playlist-saved__heading"><p>Completed playlists saved in this project.</p><button type="button" className="button button--ghost" disabled={loading} onClick={() => setReload(v => v + 1)}>Refresh</button></div>

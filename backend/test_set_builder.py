@@ -30,7 +30,7 @@ def write_music_result(root: Path, track_id: str) -> None:
 def write_analyzed_library(
     root: Path, count: int = 5, bpms: tuple[float, ...] | None = None
 ) -> tuple[str, ...]:
-    library = root / "local-assets/samples"
+    library = root / "local-assets/samples-v3"
     fixture_analysis_root = analysis_root(root)
     library.mkdir(parents=True)
     track_ids = []
@@ -169,7 +169,7 @@ class SetBuilderTest(unittest.TestCase):
     def test_mock_async_pipeline_reaches_ready_within_five_seconds(self) -> None:
         with TemporaryDirectory() as raw:
             root = Path(raw)
-            library = root / "local-assets/samples"
+            library = root / "local-assets/samples-v3"
             library.mkdir(parents=True)
             for index in range(4):
                 (library / f"mock-{index}.wav").write_bytes(f"audio-{index}".encode())

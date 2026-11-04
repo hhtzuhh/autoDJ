@@ -32,7 +32,7 @@ def preview_playlist(filename: str, content: str, catalog: dict, library_root: P
             candidate = library_root / candidate
         track = paths.get(str(candidate.resolve()))
         if track is None:
-            issues.append({"line": line, "entry": entry, "reason": "No matching song in local-assets/samples/; absolute paths must match, relative paths start at that folder"})
+            issues.append({"line": line, "entry": entry, "reason": "No matching song in local-assets/samples-v3/; absolute paths must match, relative paths start at that folder"})
             continue
         if track.id in seen:
             issues.append({"line": line, "entry": entry, "reason": "Repeated songs are not supported in the current queue"})

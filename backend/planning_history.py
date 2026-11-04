@@ -63,6 +63,16 @@ class PlanningHistory:
             request = self._read(directory / 'request.json')
             response = self._read(directory / 'response.json')
             row['scope'] = row['scope'] or trace.get('scope')
+            if row['status'] in ('timeout', 'failed') and row['scope'] == 'future_buffer':
+                later = [candidate for candidate_key, candidate in rows.items()
+                    if candidate_key in accepted and candidate['status'] == 'succeeded'
+                    and candidate.get('scope') == 'future_buffer'
+                    and candidate['sessionId'] == row['sessionId']
+                    and candidate['setRunId'] == row['setRunId']
+                    and (candidate.get('startedAt') or candidate['updatedAt']) > row['updatedAt']]
+                if later:
+                    recovered = min(later, key=lambda candidate: candidate['updatedAt'])
+                    row.update(recoveredBy=recovered['id'], recoveredAt=recovered['updatedAt'])
             row['model'] = row['model'] or request.get('model') or 'Meta'
             row['requestSaved'] = bool(request)
             try:

@@ -24,6 +24,7 @@ export interface CrowdDecision {
     observationSummary?: string; capturedAt?: string; selectedAt?: string};
 }
 export interface PlanningAttempt {
+  recoveredBy?: string; recoveredAt?: number;
   id: string; setRunId?: string | null; sessionId: string; startedAt?: number; updatedAt: number;
   status: string; scope?: string; model: string; detail?: string | null;
   goal?: string; signalSource?: string; observationId?: string; requestSaved: boolean; responseReceived: boolean;
@@ -31,6 +32,7 @@ export interface PlanningAttempt {
   transitionFunctions?: string[][] | null; inTrackCount?: number | null;
 }
 export function planningAttemptStatus(row: PlanningAttempt, sessionId?: string): string {
+  if (row.recoveredBy && (row.status === 'timeout' || row.status === 'failed')) return 'Earlier failure · later background plan ready';
   if (row.status === 'discarded') return 'Response discarded · not applied';
   if (row.status === 'timeout') return 'Timed out · not applied';
   if (row.status === 'failed') return 'Planning failed · not applied';
@@ -44,12 +46,37 @@ export function planningLogRows(state?: AdaptiveState | null) {
   ].sort((a,b) => b.at - a.at);
 }
 export interface AdaptiveState {
+  observing?: boolean; observationReason?: string | null;
+  request?: {jobId: string; setRunId?: string | null; capturedAt: string; goal: string} | null;
   planningAttempts?: PlanningAttempt[];
   setRun?: SetRun | null; setRuns?: SetRun[];
   enabled: boolean; status: string; reason: string; decision?: CrowdDecision; lastApplied?: CrowdDecision;
   memory?: {episodes?: import("./memoryEpisodes").MemoryEpisode[]; sessionId: string; sessionEvents: number; historicalEvents: number; recent: MemoryEvent[]; history?: MemoryEvent[]; setRunId?: string | null; warning?: string | null; storage: string};
   observation?: {summary: string; goal: string | null; source: string};
   decisionHistory?: CrowdDecision[];
+}
+
+export function reorderProgress(state: AdaptiveState | null | undefined, runId: string | undefined, currentOrder: string[]) {
+  const request = state?.request;
+  if (!state || !request || request.goal !== 'reorder' || !runId || request.setRunId !== runId) return null;
+  const matches = (d?: CrowdDecision) => d?.setRunId === runId && d.observationId === request.jobId;
+  const applied = matches(state.lastApplied) ? state.lastApplied : undefined;
+  if (applied && JSON.stringify(applied.after) === JSON.stringify(currentOrder)) {
+    return {phase: 'applied', title: 'New order applied', detail: 'The performance queue now uses the new order. Audio follows the scheduled cues.', decision: applied};
+  }
+  const decision = matches(state.decision) ? state.decision : undefined;
+  if (decision && ['discarded', 'cancelled', 'invalidated', 'application_failed'].includes(decision.historyStatus ?? '')) {
+    return {phase: 'cancelled', title: 'Reorder not applied', detail: decision.outcomeReason ?? state.reason};
+  }
+  if (state.status === 'staged' && decision?.queueChanged) {
+    if (JSON.stringify(decision.before) !== JSON.stringify(currentOrder)) {
+      return {phase: 'waiting', title: 'Queue changed · awaiting revalidation', detail: 'This earlier proposal is not shown as the active order.'};
+    }
+    return {phase: 'pending', title: 'New order ready · pending handoff', detail: 'The new order is shown below. Preserved songs play first; the order applies at the protected handoff.', decision};
+  }
+  if (state.status === 'planning') return {phase: 'planning', title: 'Gesture received · planning new order…', detail: state.reason};
+  if (state.status === 'queued') return {phase: 'received', title: 'Gesture received · reorder queued', detail: state.reason};
+  return {phase: 'waiting', title: state.status === 'off' ? 'Reorder cancelled' : 'Reorder waiting / not applied', detail: state.reason};
 }
 
 export function songTitle(track?: Pick<Track, 'title'> & Partial<Pick<Track, 'artist'>>): string {

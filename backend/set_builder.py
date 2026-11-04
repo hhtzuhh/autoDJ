@@ -262,7 +262,7 @@ class SetBuilderService:
     ) -> None:
         self.workspace = workspace.resolve()
         self.data_root = (data_root or workspace).resolve()
-        self.library_root = (library_root or self.data_root / "local-assets/samples").resolve()
+        self.library_root = (library_root or self.data_root / "local-assets/samples-v3").resolve()
         self.analysis_backend = selected_backend()
         self.analysis_root = analysis_root(self.data_root, self.analysis_backend)
         self.pair_root = self.data_root / "artifacts/live-performance/dashboard-pairs"
@@ -715,7 +715,7 @@ class SetBuilderService:
                 raise ValueError("Wait for the current build or analysis to finish")
             catalog = scan_catalog(self.library_root, self.analysis_root, metadata_reader=self.metadata_reader)
             if not catalog:
-                raise ValueError("No songs found in local-assets/samples/")
+                raise ValueError("No songs found in local-assets/samples-v3/")
             ids = list(catalog) if track_ids is None else track_ids
             if not isinstance(ids, list) or not ids or any(not isinstance(t, str) for t in ids):
                 raise ValueError("Select at least one song using trackIds")

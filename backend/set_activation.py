@@ -64,7 +64,7 @@ def prepare_activation(
         "updated_at": utc_now(),
     }
     catalog = AnalysisCatalog.from_root(analysis_root(workspace))
-    manifest = resolve_set_list(catalog, queue, [workspace / "local-assets/samples"])
+    manifest = resolve_set_list(catalog, queue, [workspace / "local-assets/samples-v3"])
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     short_hash = hashlib.sha256(json.dumps(queue, sort_keys=True).encode("utf-8")).hexdigest()[:5]
     export_name = f"prepared-tonight-set-{timestamp}-{short_hash}"

@@ -56,7 +56,7 @@ class SetActivationTest(unittest.TestCase):
     def test_prepares_hash_verified_playlist_without_replacing_active_queue(self) -> None:
         with TemporaryDirectory() as raw:
             root = Path(raw)
-            library = root / "local-assets/samples"
+            library = root / "local-assets/samples-v3"
             fixture_analysis_root = analysis_root(root)
             library.mkdir(parents=True)
             ids = []

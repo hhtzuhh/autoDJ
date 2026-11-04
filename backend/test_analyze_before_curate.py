@@ -11,7 +11,7 @@ from test_set_builder import metadata, write_music_result
 
 class AnalyzeBeforeCurateTest(unittest.TestCase):
     def library(self, root, count=5):
-        folder=root/'local-assets/samples';folder.mkdir(parents=True)
+        folder=root/'local-assets/samples-v3';folder.mkdir(parents=True)
         for i in range(count):
             song=folder/f'track-{i}.wav';song.write_bytes(f'synthetic-{i}'.encode())
             write_music_result(root,sha256_file(song))
@@ -97,7 +97,7 @@ class AnalyzeBeforeCurateTest(unittest.TestCase):
     def test_corrupt_cache_requires_analysis_instead_of_early_selection(self):
         with TemporaryDirectory() as raw:
             root=Path(raw);self.library(root,count=2)
-            song=next((root/'local-assets/samples').iterdir());ident=sha256_file(song)
+            song=next((root/'local-assets/samples-v3').iterdir());ident=sha256_file(song)
             path=analysis_root(root)/ident/'track-analysis-v1.json';path.parent.mkdir(parents=True);path.write_text('{broken')
             service=SetBuilderService(root,metadata_reader=metadata,start_worker=False)
             state=service.build('two',2)

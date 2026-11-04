@@ -17,10 +17,10 @@ async function json<T>(url: string, options?: RequestInit): Promise<T> {
 function post<T>(route: string, data: unknown) {
   return json<T>(`/api/adaptive/${route}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
 }
-function stopRemote(session: string | null) {
+function stopRemote(session: string | null, reason = "camera_stopped") {
   if (!session) return;
   // Lease expiry is the fallback if unload delivery or the bridge fails.
-  navigator.sendBeacon("/api/adaptive/config", new Blob([JSON.stringify({enabled: false, session})], {type: "application/json"}));
+  navigator.sendBeacon("/api/adaptive/config", new Blob([JSON.stringify({enabled: false, session, preserveAccepted: true, reason})], {type: "application/json"}));
 }
 const delay = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
   if (signal.aborted) {reject(new Error("Stopped")); return;}
@@ -93,33 +93,33 @@ export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean;
       lastApplied: adaptive.lastApplied && belongsToRun(adaptive.lastApplied, setRun?.id ?? '') ? adaptive.lastApplied : undefined} : null});
   }, [running, starting, stage, error, job, adaptive, onTelemetry, setRun?.id]);
 
-  function stop() {
+  function stop(reason = "camera_stopped") {
     const wasActive = Boolean(controller.current || stream.current || session.current);
     const ownedSession = enabled.current ? session.current : null;
     enabled.current = false;
     controller.current?.abort(); controller.current = null;
     stream.current?.getTracks().forEach(track => {track.onended = null; track.onmute = null; track.stop();}); stream.current = null;
     session.current = null;
-    stopRemote(ownedSession);
+    stopRemote(ownedSession, reason);
     if (mounted.current) {
       setRunning(false);
-      if (wasActive) setStage("Camera stopped. An already submitted observation may finish cleanup.");
-      setAdaptive(previous => previous ? {...previous, enabled: false, status: "off", reason: "Stopped with camera."} : null);
+      if (wasActive) setStage("Camera stopped. Accepted requests continue; Take over cancels automation.");
+      setAdaptive(previous => previous ? {...previous, observing: false, observationReason: "Camera stopped. Accepted requests continue."} : null);
     }
   }
   useEffect(() => {
     mounted.current = true;
-    const hidden = () => {if (document.hidden) stop();};
-    const ended = () => stop();
+    const hidden = () => {if (document.hidden) stop("page_hidden");};
+    const ended = () => stop("page_closed");
     document.addEventListener("visibilitychange", hidden);
     window.addEventListener("pagehide", ended);
-    return () => {mounted.current = false; document.removeEventListener("visibilitychange", hidden); window.removeEventListener("pagehide", ended); stop();};
+    return () => {mounted.current = false; document.removeEventListener("visibilitychange", hidden); window.removeEventListener("pagehide", ended); stop("page_closed");};
   }, []);
 
   useEffect(() => {
     if (!live && enabled.current) {
-      enabled.current = false; stopRemote(session.current);
-      setAdaptive(previous => previous ? {...previous, enabled: false, status: "off", reason: "Live DJ connection lost."} : null);
+      enabled.current = false; stopRemote(session.current, "connection_lost");
+      setAdaptive(previous => previous ? {...previous, observing: false, observationReason: "Live DJ connection lost."} : null);
     }
   }, [live]);
 
@@ -132,11 +132,11 @@ export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean;
       const heartbeatSession = session.current;
       try {
         const state = await post<Adaptive>("heartbeat", {session: heartbeatSession});
-        if (mounted.current && enabled.current && session.current === heartbeatSession) {setAdaptive(state); enabled.current = state.enabled;}
+        if (mounted.current && enabled.current && session.current === heartbeatSession) {setAdaptive(state); enabled.current = state.observing ?? state.enabled;}
       } catch (cause) {
         if (session.current !== heartbeatSession) return;
-        enabled.current = false; stopRemote(heartbeatSession);
-        if (mounted.current) {setError(cause instanceof Error ? cause.message : "Adaptive heartbeat failed."); setAdaptive(previous => previous ? {...previous, enabled: false, status: "off"} : null);}
+        enabled.current = false; stopRemote(heartbeatSession, "connection_lost");
+        if (mounted.current) {setError(cause instanceof Error ? cause.message : "Adaptive heartbeat failed."); setAdaptive(previous => previous ? {...previous, observing: false} : null);}
       } finally {busy = false;}
     };
     const timer = setInterval(() => void beat(), 5000);
@@ -182,11 +182,11 @@ export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean;
         if (enabled.current) {
           try {
             const state = await post<Adaptive>("observation", {jobId: accepted.id});
-            if (!signal.aborted) {setAdaptive(state); enabled.current = state.enabled;}
+            if (!signal.aborted) {setAdaptive(state); enabled.current = state.observing ?? state.enabled;}
           } catch (cause) {
             if (signal.aborted || session.current !== id) return;
-            enabled.current = false; stopRemote(id);
-            setAdaptive(previous => previous ? {...previous, enabled: false, status: "off"} : null);
+            enabled.current = false; stopRemote(id, "observation_error");
+            setAdaptive(previous => previous ? {...previous, observing: false} : null);
             setError(cause instanceof Error ? cause.message : "Adaptive feedback rejected.");
           }
         }
@@ -214,14 +214,14 @@ export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean;
         video: {width: {ideal: 640}, height: {ideal: 480}, frameRate: {ideal: 15, max: 15}, ...(device ? {deviceId: {exact: device}} : {})}});
       if (abort.signal.aborted || document.hidden || !mounted.current) {media.getTracks().forEach(t => t.stop()); return;}
       stream.current = media;
-      media.getVideoTracks().forEach(t => {t.onended = t.onmute = () => {stop(); setError("Camera interrupted. Restart it explicitly.");};});
+      media.getVideoTracks().forEach(t => {t.onended = t.onmute = () => {stop("camera_interrupted"); setError("Camera interrupted. Restart it explicitly.");};});
       if (preview.current) {preview.current.srcObject = media; await preview.current.play();}
       setDevices((await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput"));
       const id = crypto.randomUUID(); session.current = id;
       setRunning(true); setStage("Camera ready");
       void captureLoop(media, abort.signal, id).catch(cause => {
         if (abort.signal.aborted) return;
-        stop(); setError(cause instanceof Error ? cause.message : "Camera observation failed.");
+        stop("observation_error"); setError(cause instanceof Error ? cause.message : "Camera observation failed.");
       });
     } catch (cause) {
       stop(); if (mounted.current) setError(cause instanceof Error ? cause.message : "Camera permission was denied.");
@@ -233,9 +233,9 @@ export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean;
     setChanging(true); setError(null);
     const turnOn = !enabled.current;
     try {
-      const state = await post<Adaptive>("config", {enabled: turnOn, session: id});
-      if (session.current !== id || !stream.current || (turnOn && !liveRef.current)) {stopRemote(id); return;}
-      enabled.current = state.enabled; setAdaptive(state);
+      const state = await post<Adaptive>("config", {enabled: turnOn, session: id, ...(!turnOn ? {preserveAccepted: true, reason: "new_gestures_stopped"} : {})});
+      if (session.current !== id || !stream.current || (turnOn && !liveRef.current)) {stopRemote(id, "observation_error"); return;}
+      enabled.current = state.observing ?? state.enabled; setAdaptive(state);
     } catch (cause) {setError(cause instanceof Error ? cause.message : "Could not change adaptive mode.");}
     finally {setChanging(false);}
   }
@@ -249,15 +249,15 @@ export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean;
     lastApplied: adaptive.lastApplied && belongsToRun(adaptive.lastApplied, scope) ? adaptive.lastApplied : undefined} : null;
   return <section className="panel crowd-panel" aria-labelledby="webcam-title">
     <div className="panel__header"><div><span className="eyebrow">Meta vision → DJ planning</span><h2 id="webcam-title">Crowd adaptive · Webcam</h2></div>
-      <span className="crowd-badge">{adaptive?.enabled ? "Adaptive DJ on" : "Observation mode"}</span></div>
+      <span className="crowd-badge">{(adaptive?.observing ?? adaptive?.enabled) ? "New gestures enabled" : "New gestures off"}</span></div>
     <p className="crowd-intro">Spark observes visible audience movement. Enable adaptive DJ to save song-linked observations and use explicit gestures to request a new song order or future in-track actions.</p>
     <div className="crowd-controls">
       <label>Camera<select value={device} disabled={running || starting} onChange={e => setDevice(e.target.value)}>
         <option value="">Default computer camera</option>{devices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || "Camera"}</option>)}</select></label>
       <button className="button button--primary" disabled={starting && !running} onClick={() => running ? stop() : void start()}>{starting ? "Opening camera…" : running ? "Stop camera" : "Start webcam observation"}</button>
-      <button className="button button--ghost" disabled={!running || changing || (!live && !adaptive?.enabled)} onClick={() => void toggleAdaptive()}>{changing ? "Updating…" : adaptive?.enabled ? "Disable adaptive DJ" : "Enable adaptive DJ"}</button>
+      <button className="button button--ghost" disabled={!running || changing || (!live && !adaptive?.enabled)} onClick={() => void toggleAdaptive()}>{changing ? "Updating…" : (adaptive?.observing ?? adaptive?.enabled) ? "Stop new gestures" : "Enable adaptive DJ"}</button>
     </div>
-    <p className="crowd-note">Sends repeated 6-second silent clips to Meta using API credits. Remote deletion is attempted; local recordings and results are retained. Capture stops when this tab is hidden. Adaptive mode requires a live continuous set with Auto arm.</p>
+    <p className="crowd-note">Sends repeated 6-second silent clips to Meta using API credits. Remote deletion is attempted; local recordings and results are retained. Capture stops when this tab is hidden. Accepted requests continue until applied or expired; Take over cancels automation. Adaptive mode requires a live continuous set with Auto arm.</p>
     <div className="crowd-content">
       <div className="crowd-preview"><video ref={preview} muted playsInline aria-label="Live webcam preview" className="crowd-webcam-preview" />
         <p className="crowd-note" role="status">{stage}</p>
@@ -277,7 +277,7 @@ export function CrowdWebcam({live, tracks, setRun, onTelemetry}: {live: boolean;
         <MusicMemory episodes={(adaptive?.memory?.episodes ?? []).filter(row => belongsToRun(row, scope))}
           events={memoryRows} tracks={tracks} warning={adaptive?.memory?.warning} />
         <CrowdDecisionLog adaptive={scopedAdaptive} tracks={tracks} />
-        <p className="crowd-note">One request per held gesture. Reordering needs two unlocked songs. Changes apply after the current routine, then in-track actions wait for their scheduled song beat. The current handoff stays locked. Earlier sets remain archived and do not drive this demo. Human takeover always takes priority.</p>
+        <p className="crowd-note">One request per held gesture. Reordering preserves the current and next prepared handoff, and needs two songs after that protected prefix. The new order applies when the protected next handoff completes. In-track effects wait for their scheduled song beat. Earlier sets remain archived and do not drive this demo. Human takeover always takes priority.</p>
       </div>
     </div>
     {error && <p className="crowd-warning" role="alert">{error}</p>}

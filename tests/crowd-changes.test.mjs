@@ -65,11 +65,30 @@ test('discarded build response and timeout remain visible beside accepted decisi
   assert.deepEqual(planningLogRows(state).map(e=>e.kind),['attempt','decision','attempt']);
   assert.equal(planningAttemptStatus(discarded),'Response discarded · not applied');
   assert.equal(planningAttemptStatus(timeout),'Timed out · not applied');
+  assert.equal(planningAttemptStatus({...timeout,recoveredBy:'meta-2'}),'Earlier failure · later background plan ready');
   assert.equal(planningAttemptStatus({status:'calling',sessionId:'old'},'new'),'Interrupted · outcome unconfirmed');
   assert.equal(planningAttemptStatus({status:'calling',sessionId:'new'},'new'),'Calling Meta…');
 });
 
 import {decisionTrigger} from '../src/crowdChanges.ts';
+import {reorderProgress} from '../src/crowdChanges.ts';
+test('reorder receipt and pending order are visible before the live queue changes', () => {
+  const before=['a','b','c','d','e'], after=['a','b','c','e','d'];
+  const request={jobId:'gesture',setRunId:'run',goal:'reorder'};
+  const decision={observationId:'gesture',setRunId:'run',planId:'plan',before,after,queueChanged:true,lockedThrough:2};
+  const state={request,reason:'working',enabled:true,observing:true};
+  assert.equal(reorderProgress({...state,status:'queued'},'run',before).phase,'received');
+  assert.equal(reorderProgress({...state,status:'planning'},'run',before).phase,'planning');
+  const pending=reorderProgress({...state,status:'staged',observing:false,decision},'run',before);
+  assert.equal(pending.phase,'pending');
+  assert.deepEqual(pending.decision.after,after);
+  assert.deepEqual(before,['a','b','c','d','e']);
+  assert.equal(reorderProgress({...state,status:'committed',lastApplied:decision},'run',after).phase,'applied');
+  assert.equal(reorderProgress({...state,status:'staged',decision},'run',['b','a','c','d','e']).phase,'waiting');
+  assert.equal(reorderProgress({...state,status:'off',decision:{...decision,historyStatus:'discarded',outcomeReason:'Human takeover.'}},'run',before).phase,'cancelled');
+  assert.equal(reorderProgress({...state,status:'staged',decision},'other-run',before),null);
+  assert.equal(reorderProgress({...state,request:{...request,goal:'build'}},'run',before),null);
+});
 test('camera context in rolling calls does not imply another gesture trigger', () => {
   assert.equal(decisionTrigger({origin:'rolling',planningScope:'future_buffer',observationId:'one'}),'Trigger · automatic rolling refresh');
   assert.equal(decisionTrigger({triggerSource:'gesture',triggerGoal:'reorder'}),'Trigger · number 1 gesture (reorder)');

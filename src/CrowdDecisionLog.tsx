@@ -12,6 +12,7 @@ function AttemptRow({row, sessionId}: {row: PlanningAttempt; sessionId?: string}
     <p className="crowd-note">{row.setRunId ?? 'Unassigned'} · {row.scope === 'crowd_adaptive' ? 'Webcam request' : 'Rolling planner'}{row.goal && ` · ${row.goal} signal`}</p>
     <p className="crowd-note">{decisionTrigger({origin: row.scope === 'crowd_adaptive' ? undefined : 'rolling', planningScope: row.scope, triggerGoal: row.goal, triggerSource: row.signalSource})}</p>
     <p>{row.detail === 'RuntimeError' && row.status === 'discarded' ? 'Active plan or camera context changed before application.' : row.detail ?? 'This attempt has no accepted plan recorded.'}</p>
+    {row.recoveredBy && <p className="crowd-note">A later background request produced an accepted plan{row.recoveredAt ? ` at ${new Date(row.recoveredAt * 1000).toLocaleTimeString('en-GB')}` : ''}. The error below belongs to this earlier attempt; playback execution is tracked separately.</p>}
     <p className="plan-action-heading">{row.responseReceived ? 'Meta response received · not an executable plan' : 'No saved Meta response'}</p>
     {row.transitionFunctions && <p>Transition response: {row.transitionFunctions.map(edge => edge.map(fn => fn.replaceAll('_', ' ')).join(' + ')).join(' → ')}</p>}
     {row.inTrackCount != null && <p className="plan-action-heading">In-track response · {row.inTrackCount === 0 ? 'none selected' : `${row.inTrackCount} proposed`} · not applied</p>}

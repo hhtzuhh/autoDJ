@@ -2,6 +2,7 @@ import { AgentFlow } from "./AgentFlow";
 import type {BuildResult} from "./playlistRequest";
 import { CrowdWebcam } from "./CrowdWebcam";
 import { CrowdPlanChange } from "./CrowdPlanChange";
+import { ReorderStatus } from "./ReorderStatus";
 import { useQueueMotion } from "./useQueueMotion";
 import type { AdaptiveState } from "./crowdChanges";
 import { reorderedIds, songTitle } from "./crowdChanges";
@@ -418,6 +419,7 @@ function QueuePanel({
             : `${shownQueue.length} tracks`}
         </span>
       </div>
+      {!prepared && <ReorderStatus adaptive={adaptive} tracks={state.queue} runId={state.setRun?.id} connected={state.connected} />}
       {appliedChange && <p className="queue-change-note" role="status">Webcam order applied · {movedIds.length} songs changed position. See AI plan for the comparison.</p>}
       <div className="queue-list" ref={queueMotion} role="list" aria-label="Performance queue">
         {shownQueue.map((track, index) => {

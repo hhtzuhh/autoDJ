@@ -534,3 +534,17 @@ main { width: min(1440px, calc(100% - 64px)); margin: 0 auto; }
 .memory-episode-summary { display: inline-flex; align-items: baseline; gap: .6rem; max-width: calc(100% - 1.5rem); vertical-align: top; }
 .memory-episode-summary time { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .memory-episode-summary strong { overflow-wrap: anywhere; }
+.reorder-status {
+  margin: 0 0 16px;
+  padding: 16px;
+  border: 1px solid #78d8c080;
+  border-radius: 12px;
+  background: #78d8c00d;
+}
+.reorder-status strong { color: #9ce5d2; }
+.reorder-status p { margin: 8px 0 0; font-size: 13px; line-height: 1.5; }
+.reorder-status__label { font-weight: 700; }
+.reorder-status ol { padding-left: 24px; margin-bottom: 0; }
+.reorder-status li { padding: 5px 0; font-size: 13px; }
+.reorder-status li small { display: block; opacity: .7; }
+.reorder-status--cancelled { border-color: #d7a98180; }

@@ -45,7 +45,7 @@ export function LibraryDialog({open, mode, onClose, state, disabled, disconnecte
     <div className="playlist-dialog__header"><div><span className="eyebrow">{analysis ? "02 · Local audio analysis" : "01 · Local files"}</span>
       <h2 id="library-dialog-title">{analysis ? "Analyze library" : "All library songs"}</h2></div>
       <button type="button" className="playlist-dialog__close" onClick={onClose} aria-label="Close library dialog">×</button></div>
-    <p className="playlist-dialog__library">{rows.length} songs · <code>local-assets/samples/</code></p>
+    <p className="playlist-dialog__library">{rows.length} songs · <code>local-assets/samples-v3/</code></p>
     {analysis && <>
       <div className="library-analysis-summary" aria-live="polite">
         <span><b>{ready}</b> Ready</span><span><b>{rows.length - ready - running - failed}</b> Not ready</span>
@@ -53,7 +53,6 @@ export function LibraryDialog({open, mode, onClose, state, disabled, disconnecte
       </div>
       <div className="library-analysis-controls">
         <button type="button" className="button button--primary" disabled={locked || !selectedIds.length} onClick={() => void analyze()}>{sending ? "Starting…" : preparing ? "Working…" : `Analyze selected (${selectedIds.length})`}</button>
-        <label className="library-modal-option"><input type="checkbox" disabled checked={false} readOnly /> Modal accelerate <small>Coming soon · disabled</small></label>
       </div>
       <p className="flow-section__note">Check the songs to analyze. Only selected songs run, one local job at a time; ready results are reused. Build later completes local analysis and Muse Spark descriptions for the entire library before selecting songs.</p>
       <label className="library-select-all"><input ref={selectAll} type="checkbox" checked={allSelected} disabled={locked || !rows.length} onChange={event => setChosen(event.target.checked ? rows.map(r => r.track.id) : [])} /> Select all songs <span>{selectedIds.length} / {rows.length} selected</span></label>
@@ -62,7 +61,7 @@ export function LibraryDialog({open, mode, onClose, state, disabled, disconnecte
       {notice && <p className="playlist-dialog__notice" role="status">{notice}</p>}
     </>}
     {disconnected && <p className="playlist-dialog__error" role="status">Disconnected · showing last known library data.</p>}
-    {!rows.length ? <p className="flow-empty">No library songs available. Add audio files to local-assets/samples/, then restart the bridge to scan the folder.</p>
+    {!rows.length ? <p className="flow-empty">No library songs available. Add audio files to local-assets/samples-v3/, then restart the bridge to scan the folder.</p>
       : <div className="flow-track-table-scroll"><table className="flow-track-table">
         <thead><tr><th scope="col"># / Song</th>{analysis ? <><th scope="col">Analysis source</th><th scope="col">Status</th><th scope="col">Execution</th></> : <><th scope="col">Genre · file tag</th><th scope="col">Duration</th></>}</tr></thead>
         <tbody>{rows.map(({track, index, run, source, note}) => <tr key={track.id}>

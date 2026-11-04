@@ -21,7 +21,7 @@ def response(content='Synthetic genre: uncertain; steady percussion.', finish='s
 
 
 def prepare(root, count=3, ready=True, transport=None, curator=None, start_worker=True):
-    songs=root/'local-assets/samples';songs.mkdir(parents=True)
+    songs=root/'local-assets/samples-v3';songs.mkdir(parents=True)
     for i in range(count): (songs/f'track-{i}.mp3').write_bytes(f'synthetic audio {i}'.encode())
     service=SetBuilderService(root,metadata_reader=metadata,start_worker=False)
     if ready:

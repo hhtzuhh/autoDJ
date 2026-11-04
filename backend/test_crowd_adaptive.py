@@ -94,12 +94,17 @@ class CrowdAdaptiveTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(s._memory().context(['a'])['recentObservations']), 1)
 
-    def stage(self, callback=None, *, cache_type=FakeCache, techniques=None, in_track_actions=None, cue='reorder', inspect_candidates=None):
+    def stage(self, callback=None, *, cache_type=FakeCache, techniques=None, in_track_actions=None, cue='reorder', inspect_candidates=None, evidence_age=0):
         s = self.store
         with patch('crowd_adaptive.threading.Thread'):
             s._crowd_ingest(observation(self.session, cue=cue))
         gen, context = s.crowd_generation, s._future_context()
         evidence = deepcopy(s.crowd['observation'])
+        if evidence_age:
+            evidence['capturedAt'] = observation(self.session, age=evidence_age)['captureTime']
+        # Match scheduler ownership even when a test stubs scheduling itself.
+        s.crowd_requested = None
+        s.crowd_busy = True
         def choose(candidates, **kwargs):
             if inspect_candidates: inspect_candidates(candidates, kwargs)
             if callback: callback()
@@ -287,6 +292,224 @@ class CrowdAdaptiveTest(unittest.TestCase):
             self.assertEqual(self.store._crowd_ingest(job)[0], 409)
         self.assertEqual(self.store._crowd_ingest(observation(self.session, age=121))[0], 409)
 
+    def advance_handoff(self):
+        s = self.store
+        plan = deepcopy(s.selection['next_executable_plan'])
+        plan.update(plan_id='active-b-c',
+            deck_a={'audio_sha256': 'b', 'deck': 2},
+            deck_b={'audio_sha256': 'c', 'deck': 1, 'cue_beat_index': 24})
+        s._set_selection({'next_executable_plan': plan})
+
+    def test_reorder_crossing_handoff_replans_with_new_locked_prefix(self):
+        s = self.store
+        original_queue = deepcopy(s.queue)
+        with patch.object(s, '_schedule_future_transition_plan') as schedule:
+            self.stage(self.advance_handoff)
+        evidence = deepcopy(s.crowd_requested)
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence['jobId'], s.crowd['observation']['jobId'])
+        self.assertEqual(evidence['capturedAt'], s.crowd['observation']['capturedAt'])
+        self.assertEqual(s.crowd['status'], 'queued')
+        self.assertIsNone(s.crowd_pending)
+        self.assertEqual(s.queue, original_queue)
+        self.assertEqual(s.meta_calls[-1]['status'], 'discarded')
+        self.assertFalse(s.crowd_busy)
+        self.assertTrue(schedule.called)
+        # Retry waits for a prepared next handoff instead of replanning too close.
+        with patch('crowd_adaptive.threading.Thread') as thread:
+            self.assertFalse(s._crowd_schedule(s._future_context()))
+            thread.assert_not_called()
+        self.assertEqual(s.crowd_requested, evidence)
+
+    def test_handoff_retry_cannot_revive_cancelled_or_obsolete_request(self):
+        for reason in ('takeover', 'camera_off', 'auto_arm_off', 'unknown', 'new_request',
+                       'new_set', 'expired', 'queue_changed', 'tail', 'same_edge'):
+            with self.subTest(reason=reason):
+                self.setUp()
+                s = self.store
+                def change():
+                    self.advance_handoff()
+                    if reason == 'takeover': s._crowd_stop('Human takeover.')
+                    if reason == 'camera_off': s.request_crowd_config({'enabled': False, 'session': self.session})
+                    if reason == 'auto_arm_off': s.auto_arm_enabled = False
+                    if reason == 'unknown': s._crowd_ingest(observation(self.session, cue='unknown'))
+                    if reason == 'new_request': s._crowd_ingest(observation(self.session, cue='ease'))
+                    if reason == 'new_set': s._begin_set_run()
+                    if reason == 'queue_changed': s.queue['revision'] += 1
+                    if reason == 'tail':
+                        s.selection['next_executable_plan']['deck_a']['audio_sha256'] = 'h'
+                        s.selection['next_executable_plan']['deck_b']['audio_sha256'] = 'i'
+                    if reason == 'same_edge': s.selection['next_executable_plan']['deck_a']['audio_sha256'] = 'a'
+                with patch.object(s, '_schedule_future_transition_plan'):
+                    self.stage(change, evidence_age=121 if reason == 'expired' else 0)
+                self.assertIsNone(s.crowd_pending)
+                self.assertNotEqual((s.crowd_requested or {}).get('goal'), 'reorder')
+                if reason == 'new_request':
+                    self.assertEqual(s.crowd_requested['goal'], 'ease')
+
+    def anchored_request(self):
+        s = self.store
+        with patch('live_bridge.select_with_meta', side_effect=test_future_buffer.FutureBufferTest.choose):
+            s._future_transition_plan_worker(*s._future_context())
+        with patch('crowd_adaptive.threading.Thread') as thread:
+            s._crowd_ingest(observation(self.session, cue='reorder'))
+        self.assertEqual(thread.call_args.kwargs['name'], 'idj-crowd-planner')
+        return thread.call_args.kwargs['args']
+
+    def promote_anchor(self):
+        s = self.store
+        with patch.object(s, '_maintain_ready_buffer'):
+            result = s._promote_future_transition_plan('b', 'c', 2, 1, 60)
+        self.assertEqual(result[0], 200)
+        s.supervisor = SimpleNamespace(executor=None, manager=SimpleNamespace(envelope=SimpleNamespace(status='executing')))
+        # Arming assigns a new ID without changing the protected musical plan.
+        s.selection['next_executable_plan']['plan_id'] += '-armed'
+
+    def run_anchored_request(self, args, callback=None):
+        def choose(candidates, **kwargs):
+            self.assertTrue(all(c['ordered_track_ids'][:3] == list('abc') for c in candidates))
+            self.assertTrue(all(c['ordered_track_ids'][3] != 'd' for c in candidates))
+            self.assertEqual(kwargs['track_ids'][0], 'c')
+            if callback: callback()
+            return test_future_buffer.FutureBufferTest.choose(candidates, **kwargs)
+        with patch('crowd_adaptive.PairAnalysisCache', FakeCache), \
+                patch('crowd_adaptive.select_with_meta', side_effect=choose) as model, \
+                patch('crowd_adaptive.MetaConfig.from_environment', return_value=MetaConfig('synthetic')):
+            self.store._crowd_plan_worker(*args)
+        model.assert_called_once()
+
+    def test_later_reorder_survives_handoff_during_inference_or_after_staging(self):
+        for during_inference in (False, True):
+            with self.subTest(during_inference=during_inference):
+                self.setUp()
+                s = self.store
+                original = deepcopy(s.queue)
+                args = self.anchored_request()
+                self.run_anchored_request(args, self.promote_anchor if during_inference else None)
+                self.assertEqual(s.crowd['status'], 'staged', s.crowd['reason'])
+                self.assertEqual(s.queue, original)
+                if not during_inference:
+                    s.supervisor.manager.envelope.status = 'completed'
+                    self.assertEqual(s._crowd_commit('b', 'c', 1), 'c')
+                    self.assertIsNotNone(s.crowd_pending)
+                    self.assertEqual(s.queue, original)
+                    self.promote_anchor()
+                s.supervisor.manager.envelope.status = 'completed'
+                s.raw_performance.decks[1] = SimpleNamespace(play=True, track_id='c', beat_index=60)
+                s.raw_performance.decks[2].play = False
+                self.assertEqual(s._crowd_commit('c', 'd', 2), 'e')
+                self.assertEqual(s.queue['ordered_track_ids'][:5], list('abced'))
+                self.assertEqual(s.crowd['lastApplied']['observationId'], args[2]['jobId'])
+
+    def test_later_reorder_rejects_changed_anchor_and_cancelled_session(self):
+        for reason in ('cue', 'queue', 'camera', 'takeover', 'expiry', 'passed'):
+            with self.subTest(reason=reason):
+                self.setUp()
+                s = self.store
+                args = self.anchored_request()
+                def change():
+                    self.promote_anchor()
+                    if reason == 'cue': s.selection['next_executable_plan']['deck_b']['cue_beat_index'] += 4
+                    if reason == 'queue': s.queue['revision'] += 1
+                    if reason in ('camera', 'takeover'): s._crowd_stop(reason)
+                    if reason == 'expiry': args[2]['capturedAt'] = observation(self.session, age=121)['captureTime']
+                    if reason == 'passed':
+                        s.selection['next_executable_plan']['deck_a']['audio_sha256'] = 'c'
+                        s.selection['next_executable_plan']['deck_b']['audio_sha256'] = 'd'
+                with patch.object(s, '_schedule_future_transition_plan'):
+                    self.run_anchored_request(args, change)
+                self.assertIsNone(s.crowd_pending)
+                self.assertIsNone(s.crowd['lastApplied'])
+                self.assertEqual(s.queue['ordered_track_ids'], list('abcdefghij'))
+                call = next(c for c in s.meta_calls if c['scope'] == 'crowd_adaptive')
+                if reason in ('camera', 'takeover'):
+                    self.assertIn('Adaptive request cancelled', call['detail'])
+                if reason == 'expiry':
+                    self.assertIn('gesture expired', call['detail'])
+
+    def test_reorder_requires_two_songs_after_protected_next_handoff(self):
+        s = self.store
+        s.queue['ordered_track_ids'] = list('abcd')
+        with patch('live_bridge.select_with_meta', side_effect=test_future_buffer.FutureBufferTest.choose):
+            s._future_transition_plan_worker(*s._future_context())
+        with patch('crowd_adaptive.threading.Thread') as thread:
+            s._crowd_ingest(observation(self.session, cue='reorder'))
+        self.assertFalse(s.crowd_busy)
+        self.assertIsNone(s.crowd_requested)
+        self.assertIn('fewer than two', s.crowd['reason'])
+        thread.assert_not_called()
+
+    def test_stopping_observation_preserves_accepted_reorder_through_commit(self):
+        for when in ('queued', 'inference', 'staged', 'heartbeat'):
+            with self.subTest(when=when):
+                self.setUp()
+                s = self.store
+                def stop():
+                    if when == 'heartbeat':
+                        s.crowd_lease = time.monotonic() - 1
+                        s._crowd_valid()
+                    else:
+                        status, _ = s.request_crowd_config({'enabled': False, 'session': self.session,
+                            'preserveAccepted': True, 'reason': 'page_hidden'})
+                        self.assertEqual(status, 200)
+                if when == 'queued':
+                    with patch.object(s, '_schedule_future_transition_plan'):
+                        s._crowd_ingest(observation(self.session, cue='reorder'))
+                    stop()
+                    with patch('live_bridge.select_with_meta', side_effect=test_future_buffer.FutureBufferTest.choose), \
+                            patch('crowd_adaptive.threading.Thread') as thread:
+                        s._future_transition_plan_worker(*s._future_context())
+                    args = thread.call_args.kwargs['args']
+                else:
+                    args = self.anchored_request()
+                self.run_anchored_request(args, stop if when in ('inference', 'heartbeat') else None)
+                if when == 'staged': stop()
+                self.assertFalse(s.crowd['observing'])
+                self.assertTrue(s.crowd['enabled'])
+                self.assertEqual(s.crowd['status'], 'staged')
+                self.assertEqual(s._crowd_ingest(observation(self.session, cue='ease'))[0], 409)
+                self.assertEqual(s.request_crowd_heartbeat({'session': self.session})[0], 409)
+                self.promote_anchor()
+                s.supervisor.manager.envelope.status = 'completed'
+                s.raw_performance.decks[1] = SimpleNamespace(play=True, track_id='c', beat_index=60)
+                s.raw_performance.decks[2].play = False
+                self.assertEqual(s._crowd_commit('c', 'd', 2), 'e')
+                self.assertEqual(s.queue['ordered_track_ids'][:5], list('abced'))
+
+    def test_paused_observation_does_not_bypass_takeover_expiry_or_owner(self):
+        for reason in ('takeover', 'expiry', 'queue'):
+            with self.subTest(reason=reason):
+                self.setUp()
+                s = self.store
+                args = self.anchored_request()
+                self.run_anchored_request(args)
+                self.assertEqual(s.request_crowd_config({'enabled': False, 'session': str(uuid4()),
+                    'preserveAccepted': True})[0], 409)
+                s.request_crowd_config({'enabled': False, 'session': self.session, 'preserveAccepted': True})
+                self.promote_anchor()
+                s.supervisor.manager.envelope.status = 'completed'
+                s.raw_performance.decks[1] = SimpleNamespace(play=True, track_id='c', beat_index=60)
+                s.raw_performance.decks[2].play = False
+                if reason == 'takeover': s._crowd_stop('Human takeover.')
+                if reason == 'expiry': s.crowd_pending['evidence']['capturedAt'] = observation(self.session, age=121)['captureTime']
+                if reason == 'queue': s.queue['revision'] += 1
+                self.assertEqual(s._crowd_commit('c', 'd', 2), 'd')
+                self.assertEqual(s.queue['ordered_track_ids'], list('abcdefghij'))
+
+    def test_camera_restart_preserves_work_and_old_session_cannot_stop_new_camera(self):
+        s = self.store
+        args = self.anchored_request()
+        self.run_anchored_request(args)
+        s.request_crowd_config({'enabled': False, 'session': self.session, 'preserveAccepted': True})
+        pending = s.crowd_pending
+        generation = s.crowd_generation
+        new_session = str(uuid4())
+        self.assertEqual(s.request_crowd_config({'enabled': True, 'session': new_session})[0], 200)
+        self.assertIs(s.crowd_pending, pending)
+        self.assertEqual(s.crowd_generation, generation)
+        self.assertEqual(s.request_crowd_config({'enabled': False, 'session': self.session, 'preserveAccepted': True})[0], 409)
+        self.assertTrue(s.crowd['observing'])
+
     def test_takeover_during_model_call_cannot_publish(self):
         self.stage(lambda: self.store._crowd_stop('Human takeover.'))
         self.assertIsNone(self.store.crowd_pending)
@@ -326,12 +549,12 @@ class CrowdAdaptiveTest(unittest.TestCase):
         self.assertIn('bass_swap', s.selection['next_executable_plan']['mix'])
         self.assertEqual(s.crowd['lastApplied'].get('executionStatus'), None)
 
-    def test_expired_lease_or_passed_cue_rejects_commit(self):
-        for reason in ('lease', 'cue', 'context', 'age'):
+    def test_stopped_automation_or_passed_cue_rejects_commit(self):
+        for reason in ('auto_arm_off', 'cue', 'context', 'age'):
             self.setUp()
             self.stage(); s = self.store
             s.supervisor.manager.envelope.status = 'completed'
-            if reason == 'lease': s.crowd_lease = time.monotonic() - 1
+            if reason == 'auto_arm_off': s.auto_arm_enabled = False
             if reason == 'cue': s.raw_performance.decks[2].beat_index = 219
             if reason == 'context': s.planning_epoch = 99
             if reason == 'age': s.crowd_pending['evidence']['capturedAt'] = observation(self.session, age=121)['captureTime']

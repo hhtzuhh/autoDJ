@@ -61,6 +61,6 @@ export function PreparedPlaylistImport({disabled, busy, onBusy, mountedCount, on
       <button className="button button--secondary" disabled={locked || !preview.canImport || preview.missingAnalysis > 0} onClick={() => void restore()}>Import & mount this playlist</button>
     </>}
     {error && <p role="alert" className="playlist-dialog__error">{error}</p>}
-    <details className="panel-details"><summary>File requirements</summary><p>Songs must match local-assets/samples/. Relative paths start there. The M3U stores song order; transition candidates come from local analyses and caches.</p></details>
+    <details className="panel-details"><summary>File requirements</summary><p>Songs must match local-assets/samples-v3/. Relative paths start there. The M3U stores song order; transition candidates come from local analyses and caches.</p></details>
   </div>;
 }
