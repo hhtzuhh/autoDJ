@@ -10,24 +10,6 @@ are listed in Music Credits below.
 README rewrite in progress. Historical documentation and earlier library credits
 are retained locally and excluded from this repository. Current demo credits are below.
 
-## Current audio library
-
-Place audio in **`local-assets/samples-v3/`** inside this repository. This is the
-default for library scanning, relative M3U imports, and prepared Mixxx playlist
-exports. The earlier `samples/` and `samples-v2/` folders are retained locally and
-are not scanned by default. Audio remains ignored by Git.
-
-Additional tracks can be placed in this same folder without changing code. Update
-Music Credits with each added track's own source and license; an artist's license
-does not automatically cover other downloads.
-
-Restart `npm run bridge` to refresh the startup library, then Analyze / Build to
-prepare the new tracks and a new set. These actions also rescan the current folder.
-Analysis caches are keyed by audio hash; an old set is not converted into a new one.
-Adding files alone does not start analysis, model calls, or playback.
-Any archive setup instructions mentioning `samples/` or `samples-v2/` should now
-use `samples-v3/`.
-
 ## Music Credits
 
 The following tracks are selected for use in this Autonomous DJ demonstration:
