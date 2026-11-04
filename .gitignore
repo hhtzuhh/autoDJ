@@ -12,6 +12,7 @@ vite.config.d.ts
 .DS_Store
 .local/
 /README-archive.md
+/docs/DEMO_SCRIPT.md
 
 # Private inputs and generated runs: retain only folder documentation.
 /local-assets/*
