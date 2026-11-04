@@ -48,9 +48,10 @@ authentication layer; do not expose the service to the internet.
 4. Keep the camera stable with dancers' upper bodies and arms visible. One
    participant is supported. No camera stream or automatic restart survives
    a reload, hidden tab, disconnection, or capture error.
-5. **Stop camera** or **Disable adaptive DJ** stops new crowd-driven changes.
-   A plan already promoted/armed remains under the normal DJ controls; use
-   **Take over** to cancel audio automation.
+5. **Stop camera** or **Stop new gestures** stops new camera requests. Already
+   accepted queued, planning or staged requests continue until applied or their
+   original evidence expires. Hiding/closing the browser tab has the same behavior.
+   Use **Take over** to cancel pending requests and audio automation.
 
 The webcam profile uses one fixed `audience` region. It keeps visible movement
 separate from explicit demo gestures: both arms overhead continuously for at
@@ -101,12 +102,14 @@ raw response. Continuous fresh camera capture with this UI remains an operator c
 The bridge fetches the completed job from the fixed local vision endpoint. It
 requires a current camera session, increasing capture timestamps, unseen job ID,
 and capture age no greater than 120 seconds. A five-second browser heartbeat
-renews an 18-second lease. Stopping Auto arm, human invalidation/takeover, missing
-heartbeat, or a changed planning context prevents pending work from applying.
+renews an 18-second observation lease. Missing heartbeat stops new observations,
+while already accepted requests retain their original 120-second freshness limit.
+Stopping Auto arm, human invalidation/takeover, or an unsafe changed planning
+context prevents pending work from applying.
 Unknown/conflicting gestures or unreliable visibility invalidate staged/in-flight
 decisions. Ordinary movement does not revoke an accepted gesture proposal.
 Evidence expires after 120 seconds. New explicit gestures can retry after a
-clear release; repeated held poses cannot trigger retries. Stopping, replacement,
+clear release; repeated held poses cannot trigger retries. Cancellation, replacement,
 or expiry records a terminal discarded reason for any staged proposal.
 
 For locked A→B, the planner considers moving one remaining song next while
@@ -331,15 +334,27 @@ It is an explicit operator request; ordinary movement is record-only.
 Only one request is accepted per held pose; a subsequent clear non-reorder clip
 must release the latch. Unknown/conflicting visibility does not release it.
 
-The planner excludes the unchanged order, keeps the playing/locked prefix and
-moves one of the remaining songs next. At least two unlocked songs and a feasible
-different order are required. Natural movement cannot replace a pending explicit
+The planner excludes the unchanged order and protects both the current handoff
+and the next prepared handoff. During A→B, B→C is preserved and only songs after
+C can move. At least two songs after that prefix and a feasible different order
+are required. If the next handoff is not prepared, the request waits while the
+ordinary planner prepares it. Natural movement cannot replace a pending explicit
 reorder request; unclear evidence or takeover can still invalidate it. Calls use
-the shared scheduler and commit only at the existing verified handoff boundary.
+the shared scheduler and commit only when the protected later handoff completes.
+Normal A→B promotion does not invalidate the response: queue identity, protected
+B→C cue/action/deck bindings and control generation are rechecked. Changed timing,
+a passed protected boundary, takeover or expired evidence cannot apply the old
+response. Camera shutdown only stops new observations; accepted requests remain
+subject to the same queue, cue, ownership and freshness checks. A still-fresh reorder may be replanned after advancement;
+the original capture time is retained, so retries do not extend the 120-second
+evidence lifetime. In-track gesture planning keeps its existing timing behavior.
 Failure preserves the queue and explains why. Synthetic tests cover timed cue
 validation, cooldown bypass, repeated poses, insufficient songs, candidate
 exclusion and unchanged active playback. Real number-1 recognition still needs
 a webcam rehearsal; the schema cannot independently verify fingers in pixels.
+The November 4 later-handoff change has synthetic coverage for responses before
+and after promotion, delayed commit, cue changes, expiry and cancellation. A real
+audible reordered handoff still needs verification with this version.
 
 Webcam decisions and their execution outcomes now share one chronological row
 per plan. The UI shows song titles only for orders; reasons and parameters are
@@ -359,3 +374,24 @@ isolated by set/plan ID. The restarted bridge and Chrome show the new instructio
 both decks remain stopped and the camera is off. This change has not yet had a
 new real Meta planning call or live gesture-to-audible-action rehearsal. Existing
 recorded outcomes are retained and are not relabeled as new-policy successes.
+
+### Request visibility and stopping observation — November 4
+
+The performance queue shows receipt/planning as soon as the bridge accepts a
+number-1 request. Once Meta selects a changed order, a separate **Proposed order ·
+not yet applied** list shows the protected prefix and pending song positions.
+The actual queue remains unchanged until the protected handoff commits. Only
+a matching committed order is labeled **New order applied**; this does not claim
+that the next audible handoff has already completed. Vision capture/inference
+latency still occurs before the bridge can accept a gesture.
+
+Stopping observation, hiding the browser tab or losing its heartbeat preserves
+accepted queued/in-flight/staged work without extending evidence freshness.
+Restarting a camera preserves pending work, while stale camera sessions cannot
+stop the new owner. Takeover, stale evidence, queue/cue changes and explicit
+adaptive cancellation retain their normal rejection behavior.
+
+Synthetic verification: 328 backend tests and 40 frontend tests pass, including
+stopping observation at each request stage, lease expiry, camera restart, stale
+owners, takeover, evidence expiry and changed queues. A new real webcam-to-audible
+reorder rehearsal remains necessary for this version.
